@@ -15,6 +15,18 @@ pub fn main() !void {
 
     const response = try i3_get_workspaces(socket, alloc);
     std.debug.print("Version: {any}\n", .{response});
+    const group_names = try extract_workspace_group_names(alloc, response);
+
+    std.debug.print("Groups:\n", .{});
+    for (group_names) |group_name| {
+        std.debug.print("  {s}\n", .{group_name});
+    }
+    const group_index = try Rofi.select(alloc, group_names);
+    if (group_index) |index| {
+        std.debug.print("Selected group: {s}\n", .{group_names[index]});
+    } else {
+        std.debug.print("No group selected\n", .{});
+    }
 }
 
 const I3_Version = struct {
@@ -72,6 +84,21 @@ fn i3_get_workspaces(socket: net.Stream, alloc: Allocator) ![]I3_Workspace {
     });
     // std.debug.print("{s}\n", .{response_full});
     return response.value;
+}
+
+fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3_Workspace) ![][]const u8 {
+    var names = try std.ArrayList([]const u8).initCapacity(alloc, workspaces.len);
+    for (workspaces) |workspace| {
+        var section_iter = std.mem.tokenizeScalar(u8, workspace.name, ':');
+        _ = section_iter.next();
+        var group_name = section_iter.next() orelse "<default>";
+        if (section_iter.next() == null) {
+            // set group name to default if only 2 sections
+            group_name = "<default>";
+        }
+        names.appendAssumeCapacity(group_name);
+    }
+    return names.items;
 }
 
 const Command = enum(i32) {
@@ -157,6 +184,37 @@ fn read_reply(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Repl
     }
     return message_buffer;
 }
+
+const Rofi = struct {
+    pub fn select(alloc: Allocator, items: [][]const u8) !?u32 {
+        const args = [_][]const u8{ "rofi", "-dmenu" };
+        var child = std.process.Child.init(&args, alloc);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        try child.spawn();
+        for (items) |item| {
+            try child.stdin.?.writeAll(item);
+            try child.stdin.?.writeAll("\n");
+        }
+        // child.stdin.?.close();
+        const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
+        const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+
+        _ = try child.wait();
+
+        if (result.len == 0) {
+            return null;
+        }
+
+        for (items, 0..) |item, index| {
+            if (std.mem.eql(u8, result, item)) {
+                return @intCast(index);
+            }
+        }
+
+        return null;
+    }
+};
 
 fn split_N_times(comptime T: type, buf: []const T, needle: T, comptime N: comptime_int) [N][]const T {
     var elems: [N][]const T = undefined;
