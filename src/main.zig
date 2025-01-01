@@ -98,6 +98,26 @@ fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3_Workspace) !
         }
         names.appendAssumeCapacity(group_name);
     }
+    {
+        std.mem.sort(
+            []const u8,
+            names.items,
+            {},
+            struct {
+                fn less_than(_: void, a: []const u8, b: []const u8) bool {
+                    return std.mem.lessThan(u8, a, b);
+                }
+            }.less_than,
+        );
+        var i: u32 = 1;
+        while (i < names.items.len) {
+            if (std.mem.eql(u8, names.items[i - 1], names.items[i])) {
+                _ = names.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
     return names.items;
 }
 
