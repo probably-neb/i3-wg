@@ -1,0 +1,4 @@
+** Issues in i3-workspace-groups
+   - Python updates cause it to break
+   - Initial 1, 1 bugs i.e. not 
+   - changing workspace when another window is in that workspace fails (i.e. moving work:1 to play when play:1 exists does not work)
