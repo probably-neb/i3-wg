@@ -122,6 +122,15 @@ const I3 = struct {
         return response.value;
     }
 
+    fn rename_workspace(socket: net.Stream, alloc: Allocator, name: []const u8, to_name: []const u8) !void {
+        const command = try std.fmt.allocPrint(alloc, "rename workspace {s} to {s}", .{ name, to_name });
+        try exec_command(socket, .RUN_COMMAND, command);
+        alloc.free(command);
+        const response = try read_reply(socket, alloc, .COMMAND);
+        alloc.free(response);
+        std.debug.print("{s}\n", .{response});
+    }
+
     const Command = enum(i32) {
         RUN_COMMAND = 0,
         GET_WORKSPACES = 1,
