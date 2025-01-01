@@ -21,7 +21,7 @@ pub fn main() !void {
     for (group_names) |group_name| {
         std.debug.print("  {s}\n", .{group_name});
     }
-    const group_index = try Rofi.select(alloc, group_names);
+    const group_index = try Rofi.select(alloc, "Workspace Group", group_names);
     if (group_index) |index| {
         std.debug.print("Selected group: {s}\n", .{group_names[index]});
     } else {
@@ -186,8 +186,8 @@ fn read_reply(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Repl
 }
 
 const Rofi = struct {
-    pub fn select(alloc: Allocator, items: [][]const u8) !?u32 {
-        const args = [_][]const u8{ "rofi", "-dmenu" };
+    pub fn select(alloc: Allocator, label: []const u8, items: [][]const u8) !?u32 {
+        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
         var child = std.process.Child.init(&args, alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
