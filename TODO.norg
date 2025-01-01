@@ -2,3 +2,14 @@
    - Python updates cause it to break
    - Initial 1, 1 bugs i.e. not 
    - changing workspace when another window is in that workspace fails (i.e. moving work:1 to play when play:1 exists does not work)
+
+** Features
+   - ( )
+   -- ( ) Create new workspace group
+   -- ( ) Move workspaace to different group
+   -- ( ) <meta+w> focus arbitrary group with rofi
+   -- ( ) Rename grouped workspace (wrapper around `bindsym $mod+r exec i3-input -F 'rename workspace to "%s"' -P 'New name: '`)
+   -- ( ) Sorting groups + sorting workspaces within groups
+   --- ( ) inter+intra group sorting
+   --- ( ) use number for sorting active workspace group to front and within workspace in order
+   --- ( ) ensure if workspace name is number then it's order matches it's number
