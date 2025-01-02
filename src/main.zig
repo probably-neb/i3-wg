@@ -26,6 +26,41 @@ pub fn main() !void {
         std.debug.print("Selected group: {s}\n", .{group_names[index]});
     } else {
         std.debug.print("No group selected\n", .{});
+}
+fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !void {
+    if (base_workspaces.len == 0) {
+        return;
+    }
+    const workspaces = try alloc.dupe(I3.Workspace, base_workspaces);
+    defer alloc.free(workspaces);
+    std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_output_less_than);
+    var ouput_start_index: u32 = 0;
+    var output_end_index: u32 = 1;
+    var found_multiple_outputs = false;
+    while (output_end_index < workspaces.len) : (output_end_index += 1) {
+        const output_a = workspaces[output_end_index - 1].output;
+        const output_b = workspaces[output_end_index].output;
+        if (!std.mem.eql(u8, output_a, output_b)) {
+            std.mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+            ouput_start_index = output_end_index;
+            found_multiple_outputs = true;
+        }
+    }
+    std.mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+
+    var output = workspaces[0].output;
+    const prefix = if (found_multiple_outputs) blk: {
+        std.debug.print("{s}:\n", .{output});
+        break :blk "   ";
+    } else "";
+    for (workspaces) |workspace| {
+        if (found_multiple_outputs and !std.mem.eql(u8, workspace.output, output)) {
+            std.debug.print("{s}:\n", .{workspace.output});
+            output = workspace.output;
+        }
+        std.debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
+        std.debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
+        std.debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
 }
 
@@ -94,6 +129,14 @@ const I3 = struct {
         num: u32,
         urgent: bool,
         focused: bool,
+
+        pub fn sort_by_output_less_than(_: void, a: Workspace, b: Workspace) bool {
+            return std.mem.lessThan(u8, a.output, b.output);
+        }
+
+        pub fn sort_by_name_less_than(_: void, a: Workspace, b: Workspace) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
 
         pub fn format(self: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.writeAll("Workspace{ ");
