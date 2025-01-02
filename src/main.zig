@@ -2,31 +2,76 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 
-pub fn main() !void {
-    const alloc = std.heap.page_allocator;
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
-    // orelse {
-    //     std.debug.print("I3SOCK not set\n", .{});
-    //     return error.I3SOCKNotSet;
-    // };
+const Cli_Commands = enum {
+    Help,
+    Switch_Active_Workspace_Group,
+    Assign_Workspace_To_Group,
+    Focus_On_Arbitrary_Workspace,
+    Move_Active_Container_To_Arbitrary_Workspace,
+    Rename_Workspace,
+    Focus_On_Workspace_Number,
+    Move_Active_Container_To_Workspace_Number,
+    Pretty_List_Workspaces,
 
+    pub const Map = std.StaticStringMap(@This()).initComptime(.{
+        .{ "switch-active-workspace-group", .Switch_Active_Workspace_Group },
+        .{ "assign-workspace-to-group", .Assign_Workspace_To_Group },
+        .{ "focus-on-arbitrary-workspace", .Focus_On_Arbitrary_Workspace },
+        .{ "move-active-container-to-arbitrary-workspace", .Move_Active_Container_To_Arbitrary_Workspace },
+        .{ "rename-workspace", .Rename_Workspace },
+        .{ "focus-workspace-number", .Focus_On_Workspace_Number },
+        .{ "move-active-container-to-workspace", .Move_Active_Container_To_Workspace_Number },
+        .{ "dbg-pretty-print-workspaces", .Pretty_List_Workspaces },
+        .{ "help", .Help },
+        .{ "--help", .Help },
+        .{ "-h", .Help },
+    });
+};
+
+pub fn main() !void {
+    const base_alloc = std.heap.page_allocator;
+    var arena_alloc = std.heap.ArenaAllocator.init(base_alloc);
+    const alloc = arena_alloc.allocator();
+
+    var args_iter = try std.process.argsWithAllocator(alloc);
+    _ = args_iter.next();
+
+    const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
     const socket = try net.connectUnixSocket(socket_path);
 
-    const response = try I3.get_workspaces(socket, alloc);
-    std.debug.print("Version: {any}\n", .{response});
-    const group_names = try extract_workspace_group_names(alloc, response);
-
-    std.debug.print("Groups:\n", .{});
-    for (group_names) |group_name| {
-        std.debug.print("  {s}\n", .{group_name});
+    const cmd = if (args_iter.next()) |cmd_str| Cli_Commands.Map.get(cmd_str) orelse Cli_Commands.Help else Cli_Commands.Help;
+    switch (cmd) {
+        .Help => {
+            return error.NotImplemented;
+        },
+        .Switch_Active_Workspace_Group => {
+            return error.NotImplemented;
+        },
+        .Assign_Workspace_To_Group => {
+            return error.NotImplemented;
+        },
+        .Focus_On_Arbitrary_Workspace => {
+            return error.NotImplemented;
+        },
+        .Move_Active_Container_To_Arbitrary_Workspace => {
+            return error.NotImplemented;
+        },
+        .Rename_Workspace => {
+            return error.NotImplemented;
+        },
+        .Focus_On_Workspace_Number => {
+            return error.NotImplemented;
+        },
+        .Move_Active_Container_To_Workspace_Number => {
+            return error.NotImplemented;
+        },
+        .Pretty_List_Workspaces => {
+            const workspaces = try I3.get_workspaces(socket, alloc);
+            try pretty_list_workspaces(alloc, workspaces);
+        },
     }
-    const group_index = try Rofi.select(alloc, "Workspace Group", group_names);
-    if (group_index) |index| {
-        std.debug.print("Selected group: {s}\n", .{group_names[index]});
-    } else {
-        std.debug.print("No group selected\n", .{});
 }
+
 fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !void {
     if (base_workspaces.len == 0) {
         return;
