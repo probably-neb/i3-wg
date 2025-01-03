@@ -40,17 +40,63 @@ pub fn main() !void {
     const socket = try net.connectUnixSocket(socket_path);
 
     const cmd = if (args_iter.next()) |cmd_str| Cli_Commands.Map.get(cmd_str) orelse Cli_Commands.Help else Cli_Commands.Help;
+    // TODO: suggest command in case of misspelling
     switch (cmd) {
         .Help => {
             return error.NotImplemented;
         },
         .Switch_Active_Workspace_Group => {
-            return error.NotImplemented;
+            const workspaces = try I3.get_workspaces(socket, alloc);
+            const group_names = try extract_workspace_group_names(alloc, workspaces);
+            const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return;
+            const new_workspace_group_name = switch (choice) {
+                .new => |name| name,
+                .existing => |index| group_names[index],
+            };
+            // TODO: get current workspace index and switch to that number in other group if exists
+            const new_workspace_num = 100202; // TODO: correctly compute
+            const new_workspace_name = try std.fmt.allocPrint(alloc, "{d}:{s}:1", .{ new_workspace_num, new_workspace_group_name });
+            try I3.switch_to_workspace(socket, alloc, new_workspace_name);
+
+            return;
         },
         .Assign_Workspace_To_Group => {
             return error.NotImplemented;
         },
         .Focus_On_Arbitrary_Workspace => {
+            const workspaces = try I3.get_workspaces(socket, alloc);
+            std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
+            const WsNamePair = @typeInfo(@TypeOf(I3.Workspace.get_group_name_and_rest_name)).Fn.return_type.?;
+            var names = try alloc.alloc(WsNamePair, workspaces.len);
+            var group_name_len_max: u64 = 0;
+            var name_len_max: u64 = 0;
+
+            for (workspaces, 0..) |workspace, index| {
+                const pair = I3.Workspace.get_group_name_and_rest_name(workspace);
+                if (pair.group_name.len > group_name_len_max) {
+                    group_name_len_max = pair.group_name.len;
+                }
+                if (pair.name.len > name_len_max) {
+                    name_len_max = pair.name.len;
+                }
+                names[index] = pair;
+            }
+
+            var selection = try Rofi.select_writer(alloc, "Workspace");
+            // TODO: Pango markup help text here
+
+            for (names) |pair| {
+                try selection.writer.writeByteNTimes(' ', pair.group_name.len -| group_name_len_max);
+                try selection.writer.writeAll(pair.group_name);
+                try selection.writer.writeByteNTimes(' ', 2 + name_len_max -| pair.name.len);
+                try selection.writer.writeAll(pair.name);
+                try selection.writer.writeByte('\n');
+            }
+            const maybe_choice = try selection.finish();
+            if (maybe_choice == null) return;
+            const choice = maybe_choice.?;
+            std.debug.print("choice: {s}\n", .{choice});
+            // TODO: if choice contains ":" then create new workspace (and possibly group)
             return error.NotImplemented;
         },
         .Move_Active_Container_To_Arbitrary_Workspace => {
@@ -104,6 +150,7 @@ fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !vo
             output = workspace.output;
         }
         std.debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
+        std.debug.print("{s}  group: {s}\n", .{ prefix, workspace.get_group_name() });
         std.debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
         std.debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
@@ -112,13 +159,7 @@ fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !vo
 fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3.Workspace) ![][]const u8 {
     var names = try std.ArrayList([]const u8).initCapacity(alloc, workspaces.len);
     for (workspaces) |workspace| {
-        var section_iter = std.mem.tokenizeScalar(u8, workspace.name, ':');
-        _ = section_iter.next();
-        var group_name = section_iter.next() orelse "<default>";
-        if (section_iter.next() == null) {
-            // set group name to default if only 2 sections
-            group_name = "<default>";
-        }
+        const group_name = workspace.get_group_name();
         names.appendAssumeCapacity(group_name);
     }
     {
@@ -183,6 +224,45 @@ const I3 = struct {
             return std.mem.lessThan(u8, a.name, b.name);
         }
 
+        pub fn sort_by_group_name_less_than(_: void, a: Workspace, b: Workspace) bool {
+            // TODO: consider caching group_names
+            return std.mem.lessThan(u8, a.get_group_name(), b.get_group_name());
+        }
+
+        // PERF: rewrite
+        pub fn sort_by_group_name_and_name_num_less_than(_: void, a: Workspace, b: Workspace) bool {
+            const info_a = a.get_group_name_and_rest_name();
+            const info_b = b.get_group_name_and_rest_name();
+
+            if (!std.mem.eql(u8, info_a.group_name, info_b.group_name)) {
+                return std.mem.lessThan(u8, info_a.group_name, info_b.group_name);
+            }
+            return std.mem.lessThan(u8, info_a.name, info_b.name);
+        }
+
+        pub fn get_group_name_and_rest_name(self: Workspace) struct { group_name: []const u8, name: []const u8 } {
+            var section_iter = std.mem.tokenizeScalar(u8, self.name, ':');
+            _ = section_iter.next();
+            var group_name = section_iter.next() orelse "<default>";
+            const rest_name = section_iter.rest();
+            if (section_iter.next() == null) {
+                // set group name to default if only 2 sections
+                group_name = "<default>";
+            }
+            return .{ .group_name = group_name, .name = rest_name };
+        }
+
+        pub fn get_group_name(self: Workspace) []const u8 {
+            var section_iter = std.mem.tokenizeScalar(u8, self.name, ':');
+            _ = section_iter.next();
+            var group_name = section_iter.next() orelse "<default>";
+            if (section_iter.next() == null) {
+                // set group name to default if only 2 sections
+                group_name = "<default>";
+            }
+            return group_name;
+        }
+
         pub fn format(self: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
             try writer.writeAll("Workspace{ ");
             const fields = .{ "id", "name", "rect", "output", "num", "urgent", "focused" };
@@ -216,7 +296,17 @@ const I3 = struct {
         alloc.free(command);
         const response = try read_reply(socket, alloc, .COMMAND);
         alloc.free(response);
+
         std.debug.print("{s}\n", .{response});
+    }
+
+    fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
+        const command = "workspace ";
+        try exec_command_len(socket, .RUN_COMMAND, @intCast(command.len + name.len));
+        try socket.writeAll(command);
+        try socket.writeAll(name);
+        try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+        return;
     }
 
     const Command = enum(i32) {
@@ -258,6 +348,12 @@ const I3 = struct {
         try socket.writeAll(&std.mem.toBytes(@as(i32, @intCast(msg.len))));
         try socket.writeAll(&std.mem.toBytes(@as(i32, @intFromEnum(command))));
         try socket.writeAll(msg);
+    }
+
+    fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !void {
+        try socket.writeAll(MAGIC_STRING);
+        try socket.writeAll(&std.mem.toBytes(@as(i32, @intCast(msg_len))));
+        try socket.writeAll(&std.mem.toBytes(@as(i32, @intFromEnum(command))));
     }
 
     fn read_reply(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Reply) ![]const u8 {
@@ -302,6 +398,22 @@ const I3 = struct {
         }
         return message_buffer;
     }
+
+    fn read_reply_expect_single_success_true(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Reply) !void {
+        const expected_response = "[{\"success\":true}]";
+        const expected_response_2 = "[{\"success\": true}]";
+        var buf: [expected_response_2.len + 1]u8 = undefined;
+        var buf_alloc = std.heap.FixedBufferAllocator.init(&buf);
+        const response = try read_reply(socket, buf_alloc.allocator(), expected_reply);
+        std.debug.print("response: '{s}' '{s}'\n", .{ response, expected_response });
+        const equals_expected_response = if (response.len >= expected_response_2.len) std.mem.eql(u8, response[0..expected_response_2.len], expected_response_2) else std.mem.eql(u8, response[0..expected_response.len], expected_response);
+        if (!equals_expected_response) {
+            // TODO: parse out error message using original alloc and log / return it
+            _ = alloc;
+            return error.UnsuccessfulResponse;
+        }
+        return;
+    }
 };
 
 const Rofi = struct {
@@ -332,6 +444,62 @@ const Rofi = struct {
         }
 
         return null;
+    }
+
+    const SelectWriterIntermediate = struct {
+        child: std.process.Child,
+        writer: std.fs.File.Writer,
+        alloc: std.mem.Allocator,
+
+        pub fn finish(self: *SelectWriterIntermediate) !?[]const u8 {
+            const result_full = try self.child.stdout.?.readToEndAlloc(self.alloc, std.math.maxInt(usize));
+            const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+
+            _ = try self.child.wait();
+
+            if (result.len == 0) {
+                return null;
+            }
+
+            return result;
+        }
+    };
+
+    pub fn select_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
+        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
+        var child = std.process.Child.init(&args, alloc);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        try child.spawn();
+        return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
+    }
+
+    pub fn select_or_new(alloc: Allocator, label: []const u8, items: [][]const u8) !?union(enum) { existing: u32, new: []const u8 } {
+        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
+        var child = std.process.Child.init(&args, alloc);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        try child.spawn();
+        for (items) |item| {
+            try child.stdin.?.writeAll(item);
+            try child.stdin.?.writeAll("\n");
+        }
+        // child.stdin.?.close();
+        const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
+        const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+
+        _ = try child.wait();
+
+        if (result.len == 0) {
+            return null;
+        }
+
+        for (items, 0..) |item, index| {
+            if (std.mem.eql(u8, result, item)) {
+                return .{ .existing = @intCast(index) };
+            }
+        }
+        return .{ .new = result };
     }
 };
 
