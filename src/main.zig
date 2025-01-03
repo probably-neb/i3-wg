@@ -2,24 +2,26 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 
+const INACTIVE_WORKSPACE_FACTOR = 10_000;
+
 const Cli_Commands = enum {
     Help,
     Switch_Active_Workspace_Group,
     Assign_Workspace_To_Group,
-    Focus_On_Arbitrary_Workspace,
+    Focus_Workspace_Select,
     Move_Active_Container_To_Arbitrary_Workspace,
     Rename_Workspace,
-    Focus_On_Workspace_Number,
+    Focus_Workspace,
     Move_Active_Container_To_Workspace_Number,
     Pretty_List_Workspaces,
 
     pub const Map = std.StaticStringMap(@This()).initComptime(.{
         .{ "switch-active-workspace-group", .Switch_Active_Workspace_Group },
         .{ "assign-workspace-to-group", .Assign_Workspace_To_Group },
-        .{ "focus-on-arbitrary-workspace", .Focus_On_Arbitrary_Workspace },
+        .{ "focus-workspace-select", .Focus_Workspace_Select },
         .{ "move-active-container-to-arbitrary-workspace", .Move_Active_Container_To_Arbitrary_Workspace },
         .{ "rename-workspace", .Rename_Workspace },
-        .{ "focus-workspace-number", .Focus_On_Workspace_Number },
+        .{ "focus-workspace", .Focus_Workspace },
         .{ "move-active-container-to-workspace", .Move_Active_Container_To_Workspace_Number },
         .{ "dbg-pretty-print-workspaces", .Pretty_List_Workspaces },
         .{ "help", .Help },
@@ -49,6 +51,7 @@ pub fn main() !void {
             const workspaces = try I3.get_workspaces(socket, alloc);
             const group_names = try extract_workspace_group_names(alloc, workspaces);
             const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return;
+            // TODO: if new_workspace_group_name already exists, don't rename all workspaces
             const new_workspace_group_name = switch (choice) {
                 .new => |name| name,
                 .existing => |index| group_names[index],
@@ -63,16 +66,16 @@ pub fn main() !void {
         .Assign_Workspace_To_Group => {
             return error.NotImplemented;
         },
-        .Focus_On_Arbitrary_Workspace => {
+        .Focus_Workspace_Select => {
             const workspaces = try I3.get_workspaces(socket, alloc);
             std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
-            const WsNamePair = @typeInfo(@TypeOf(I3.Workspace.get_group_name_and_rest_name)).Fn.return_type.?;
+            const WsNamePair = @typeInfo(@TypeOf(I3.Workspace.get_name_info)).Fn.return_type.?;
             var names = try alloc.alloc(WsNamePair, workspaces.len);
             var group_name_len_max: u64 = 0;
             var name_len_max: u64 = 0;
 
             for (workspaces, 0..) |workspace, index| {
-                const pair = I3.Workspace.get_group_name_and_rest_name(workspace);
+                const pair = I3.Workspace.get_name_info(workspace);
                 if (pair.group_name.len > group_name_len_max) {
                     group_name_len_max = pair.group_name.len;
                 }
@@ -86,9 +89,9 @@ pub fn main() !void {
             // TODO: Pango markup help text here
 
             for (names) |pair| {
-                try selection.writer.writeByteNTimes(' ', pair.group_name.len -| group_name_len_max);
+                try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
                 try selection.writer.writeAll(pair.group_name);
-                try selection.writer.writeByteNTimes(' ', 2 + name_len_max -| pair.name.len);
+                try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
                 try selection.writer.writeAll(pair.name);
                 try selection.writer.writeByte('\n');
             }
@@ -105,8 +108,70 @@ pub fn main() !void {
         .Rename_Workspace => {
             return error.NotImplemented;
         },
-        .Focus_On_Workspace_Number => {
-            return error.NotImplemented;
+        .Focus_Workspace => {
+            const workspaces = try I3.get_workspaces(socket, alloc);
+
+            const name = args_iter.next() orelse return error.MissingArgument;
+
+            var active_workspace_group: []const u8 = undefined;
+            var active_workspace_group_found = false;
+            // TODO:
+            // - identify whether chosen workspace already exists (and is active workspace group)
+            // - if it exists identify the name and switch to it
+            // - else create number for it and format name before switching to it
+            for (workspaces) |workspace| {
+                if (workspace.num < INACTIVE_WORKSPACE_FACTOR) {
+                    if (active_workspace_group_found) {
+                        std.debug.assert(std.mem.eql(u8, workspace.get_group_name(), active_workspace_group));
+                    } else {
+                        active_workspace_group = workspace.get_group_name();
+                        active_workspace_group_found = true;
+                    }
+                }
+            }
+            if (!active_workspace_group_found) return error.NoActiveWorkspaceGroup;
+
+            const workspace_num = blk: {
+                const name_num: ?u32 = std.fmt.parseUnsigned(u32, name, 10) catch null;
+                if (name_num != null and name_num.? < 10) {
+                    break :blk name_num.?;
+                }
+                for (workspaces) |workspace| {
+                    const info = workspace.get_name_info();
+                    if (std.mem.eql(u8, info.name, name)) {
+                        break :blk workspace.num;
+                    }
+                }
+                var group_num_max: u32 = 0;
+                for (workspaces) |workspace| {
+                    if (std.mem.eql(u8, workspace.get_group_name(), active_workspace_group) and workspace.num > group_num_max) {
+                        group_num_max = workspace.num;
+                    }
+                }
+                break :blk group_num_max + 1;
+            };
+
+            const workspace_group_name = if (std.mem.eql(u8, active_workspace_group, "<default>")) "" else active_workspace_group;
+
+            const command_len =
+                "workspace ".len +
+                count_digits(workspace_num) +
+                ":".len +
+                workspace_group_name.len +
+                (if (workspace_group_name.len == 0) 0 else ":".len) +
+                name.len;
+
+            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
+            try socket.writeAll("workspace ");
+            try socket.writer().print("{d}", .{workspace_num});
+            try socket.writer().writeByte(':');
+            if (workspace_group_name.len > 0) {
+                try socket.writeAll(workspace_group_name);
+                try socket.writer().writeByte(':');
+            }
+            try socket.writeAll(name);
+
+            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
         },
         .Move_Active_Container_To_Workspace_Number => {
             return error.NotImplemented;
@@ -231,8 +296,8 @@ const I3 = struct {
 
         // PERF: rewrite
         pub fn sort_by_group_name_and_name_num_less_than(_: void, a: Workspace, b: Workspace) bool {
-            const info_a = a.get_group_name_and_rest_name();
-            const info_b = b.get_group_name_and_rest_name();
+            const info_a = a.get_name_info();
+            const info_b = b.get_name_info();
 
             if (!std.mem.eql(u8, info_a.group_name, info_b.group_name)) {
                 return std.mem.lessThan(u8, info_a.group_name, info_b.group_name);
@@ -240,16 +305,22 @@ const I3 = struct {
             return std.mem.lessThan(u8, info_a.name, info_b.name);
         }
 
-        pub fn get_group_name_and_rest_name(self: Workspace) struct { group_name: []const u8, name: []const u8 } {
+        const NameInfo = struct {
+            num: ?[]const u8,
+            group_name: []const u8,
+            name: []const u8,
+        };
+
+        pub fn get_name_info(self: Workspace) NameInfo {
             var section_iter = std.mem.tokenizeScalar(u8, self.name, ':');
-            _ = section_iter.next();
+            const num = section_iter.next();
             var group_name = section_iter.next() orelse "<default>";
             const rest_name = section_iter.rest();
             if (section_iter.next() == null) {
                 // set group name to default if only 2 sections
                 group_name = "<default>";
             }
-            return .{ .group_name = group_name, .name = rest_name };
+            return .{ .num = num, .group_name = group_name, .name = rest_name };
         }
 
         pub fn get_group_name(self: Workspace) []const u8 {
@@ -531,4 +602,20 @@ fn strip_prefix_exact(comptime T: type, buf: []const T, prefix: []const T) []con
     std.debug.assert(buf.len > prefix.len);
     std.debug.assert(std.mem.eql(T, buf[0..prefix.len], prefix));
     return buf[prefix.len..];
+}
+
+fn count_digits(num: anytype) usize {
+    if (num == 0) return 1;
+    const val: u128 = if (num < 0) @intCast(-num) else num;
+    return std.math.log10_int(val) + 1;
+}
+
+test count_digits {
+    try std.testing.expectEqual(1, count_digits(1));
+    try std.testing.expectEqual(1, count_digits(0));
+    try std.testing.expectEqual(2, count_digits(10));
+    try std.testing.expectEqual(2, count_digits(99));
+    try std.testing.expectEqual(3, count_digits(100));
+    try std.testing.expectEqual(3, count_digits(999));
+    try std.testing.expectEqual(4, count_digits(-1000));
 }
