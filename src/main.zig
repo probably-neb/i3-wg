@@ -2,7 +2,7 @@ const std = @import("std");
 const net = std.net;
 const Allocator = std.mem.Allocator;
 
-const INACTIVE_WORKSPACE_FACTOR = 10_000;
+const INACTIVE_WORKSPACE_GROUP_FACTOR = 10_000;
 
 const Cli_Commands = enum {
     Help,
@@ -50,16 +50,167 @@ pub fn main() !void {
         .Switch_Active_Workspace_Group => {
             const workspaces = try I3.get_workspaces(socket, alloc);
             const group_names = try extract_workspace_group_names(alloc, workspaces);
+            // TODO: ensure default group is always shown?
             const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return;
             // TODO: if new_workspace_group_name already exists, don't rename all workspaces
+            // TODO: allow entering `group_name:workspace_name` to create new workspace with non number workspace name
             const new_workspace_group_name = switch (choice) {
                 .new => |name| name,
                 .existing => |index| group_names[index],
             };
-            // TODO: get current workspace index and switch to that number in other group if exists
-            const new_workspace_num = 100202; // TODO: correctly compute
-            const new_workspace_name = try std.fmt.allocPrint(alloc, "{d}:{s}:1", .{ new_workspace_num, new_workspace_group_name });
-            try I3.switch_to_workspace(socket, alloc, new_workspace_name);
+            // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
+            const is_new = choice == .new;
+
+            const is_default = !is_new and std.mem.eql(u8, new_workspace_group_name, "<default>");
+
+            // ?TODO: consider if focused workspace is also in active workspace group, using it's number
+            // TODO: if switching to exisiting group, and not doing current ws number, switch to lowest number in that group
+            const new_workspace_num = 1;
+
+            // FIXME: rename all workspaces here if group not active (or new)
+            renaming: {
+                // number of groups based on unique
+                var group_logical_indices = try alloc.alloc(u32, group_names.len);
+                @memset(group_logical_indices, 0);
+
+                var active_group: []const u8 = "";
+                var logical_group_count: u32 = 0; // default 1 for <default> group
+                for (workspaces) |workspace| {
+                    const logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                    if (logical_group_index > logical_group_count) {
+                        logical_group_count = logical_group_index;
+                    }
+
+                    const group_name = workspace.get_group_name();
+                    const group_name_index = group_name_index: for (group_names, 0..) |existing_group_name, index| {
+                        if (std.mem.eql(u8, existing_group_name, group_name)) break :group_name_index index;
+                    } else unreachable;
+
+                    std.debug.assert(group_logical_indices[group_name_index] == 0 or group_logical_indices[group_name_index] == logical_group_index);
+                    group_logical_indices[group_name_index] = logical_group_index;
+
+                    if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR and active_group.len == 0) {
+                        active_group = group_name;
+                    } else if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
+                        std.debug.assert(std.mem.eql(u8, group_name, active_group));
+                    }
+                }
+                logical_group_count += 1;
+                std.debug.assert(logical_group_count >= group_names.len);
+                std.debug.assert(active_group.len > 0);
+
+                if (std.mem.eql(u8, active_group, new_workspace_group_name)) {
+                    break :renaming;
+                }
+
+                // actually inverted (set => not found, unset => found) because api only provides findFirstSet not findFirstUnset
+                var found_logical_group_index_map = try std.DynamicBitSetUnmanaged.initFull(alloc, logical_group_count + 1); // +1 for final always unset bit
+                for (workspaces) |workspace| {
+                    const logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                    found_logical_group_index_map.unset(logical_group_index);
+                }
+
+                //PERF: just check if < pivot logical_group_index+=1 instead of allocating lut
+                var new_logical_group_index_map = try alloc.alloc(u32, logical_group_count);
+                const pivot = found_logical_group_index_map.findFirstSet().?;
+                for (0..pivot) |i| {
+                    new_logical_group_index_map[i] = @intCast(i + 1);
+                }
+                for (pivot..logical_group_count) |i| {
+                    new_logical_group_index_map[i] = @intCast(i);
+                }
+
+                // const NameInfo = struct {
+                //     num_actual: u32,
+                //     num_logical: u32,
+                //     name_group: []const u8,
+                //     name_workspace: []const u8,
+                // };
+
+                // FIXME: handle write or rename failure (easier if writes are batched and we have an intermediate buffer of name mappings)
+                // PERF: batch all rename calls
+                var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
+                var iterations: usize = 0;
+
+                // TODO: determine whether rename conflicts (resulting in need to retry) actually happen now that bugs are fixed
+                while (completed.count() < workspaces.len and iterations < 100) : (iterations += 1) {
+                    for (workspaces, 0..) |workspace, index| {
+                        if (completed.isSet(index)) continue;
+
+                        const info = workspace.get_name_info();
+
+                        const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+                        const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                        const is_group_new_active = !is_new and std.mem.eql(u8, info.group_name, new_workspace_group_name);
+                        const num_logical_new = if (is_group_new_active) 0 else new_logical_group_index_map[num_logical_orig];
+                        std.debug.print(
+                            "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
+                            .{
+                                workspace.name,
+                                info.name,
+                                num_logical_orig,
+                                num_actual,
+                                num_logical_new,
+                                num_actual,
+                            },
+                        );
+
+                        const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
+
+                        const is_group_default = std.mem.eql(u8, info.group_name, "<default>");
+
+                        const command_len =
+                            "rename workspace ".len +
+                            workspace.name.len +
+                            " to ".len +
+                            count_digits(new_combined_num) +
+                            ":".len +
+                            (if (is_group_default) 0 else info.group_name.len + ":".len) +
+                            info.name.len;
+                        try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
+                        var writer = socket.writer();
+                        try writer.writeAll("rename workspace ");
+                        try writer.writeAll(workspace.name);
+                        try writer.writeAll(" to ");
+                        try std.fmt.formatInt(new_combined_num, 10, .lower, .{}, writer);
+                        try writer.writeByte(':');
+                        if (!is_group_default) {
+                            try writer.writeAll(info.group_name);
+                            try writer.writeByte(':');
+                        }
+                        try writer.writeAll(info.name);
+
+                        var success = true;
+                        I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND) catch {
+                            success = false;
+                        };
+                        if (success) {
+                            completed.set(index);
+                        }
+                    }
+                }
+            }
+
+            const command_len =
+                "workspace ".len +
+                count_digits(new_workspace_num) +
+                ":".len +
+                (if (is_default) 0 else new_workspace_group_name.len + ":".len) +
+                count_digits(new_workspace_num);
+
+            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
+
+            var writer = socket.writer();
+
+            try writer.writeAll("workspace ");
+            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, writer);
+            try writer.writeByte(':');
+            if (!is_default) {
+                try writer.writeAll(new_workspace_group_name);
+                try writer.writeByte(':');
+            }
+            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, writer);
+            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 
             return;
         },
@@ -120,7 +271,7 @@ pub fn main() !void {
             // - if it exists identify the name and switch to it
             // - else create number for it and format name before switching to it
             for (workspaces) |workspace| {
-                if (workspace.num < INACTIVE_WORKSPACE_FACTOR) {
+                if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
                     if (active_workspace_group_found) {
                         std.debug.assert(std.mem.eql(u8, workspace.get_group_name(), active_workspace_group));
                     } else {
