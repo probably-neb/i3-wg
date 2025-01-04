@@ -220,8 +220,7 @@ pub fn main() !void {
         .Focus_Workspace_Select => {
             const workspaces = try I3.get_workspaces(socket, alloc);
             std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
-            const WsNamePair = @typeInfo(@TypeOf(I3.Workspace.get_name_info)).Fn.return_type.?;
-            var names = try alloc.alloc(WsNamePair, workspaces.len);
+            var names = try alloc.alloc(I3.Workspace.NameInfo, workspaces.len);
             var group_name_len_max: u64 = 0;
             var name_len_max: u64 = 0;
 
@@ -313,12 +312,14 @@ pub fn main() !void {
                 name.len;
 
             try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
-            try socket.writeAll("workspace ");
-            try socket.writer().print("{d}", .{workspace_num});
-            try socket.writer().writeByte(':');
+            var writer = socket.writer();
+
+            try writer.writeAll("workspace ");
+            try std.fmt.formatInt(workspace_num, 10, .lower, .{}, writer);
+            try writer.writeByte(':');
             if (workspace_group_name.len > 0) {
-                try socket.writeAll(workspace_group_name);
-                try socket.writer().writeByte(':');
+                try writer.writeAll(workspace_group_name);
+                try writer.writeByte(':');
             }
             try socket.writeAll(name);
 
