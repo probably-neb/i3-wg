@@ -463,15 +463,29 @@ const I3 = struct {
         };
 
         pub fn get_name_info(self: Workspace) NameInfo {
-            var section_iter = std.mem.tokenizeScalar(u8, self.name, ':');
-            const num = section_iter.next();
-            var group_name = section_iter.next() orelse "<default>";
-            const rest_name = section_iter.rest();
-            if (section_iter.next() == null) {
-                // set group name to default if only 2 sections
-                group_name = "<default>";
+            const count_colons = blk: {
+                var count: u32 = 0;
+                for (self.name) |c| {
+                    count += @intFromBool(c == ':');
+                }
+                break :blk count;
+            };
+            switch (count_colons) {
+                0 => return .{ .num = self.name, .group_name = "<default>", .name = self.name },
+                1 => {
+                    const part = std.mem.lastIndexOfScalar(u8, self.name, ':').?;
+                    return .{ .num = self.name[0..part], .group_name = "<default>", .name = self.name[part + 1 ..] };
+                },
+                else => {
+                    const part_a = std.mem.indexOfScalar(u8, self.name, ':').?;
+                    const part_b = std.mem.indexOfScalarPos(u8, self.name, part_a + 1, ':').?;
+                    return .{
+                        .num = self.name[0..part_a],
+                        .group_name = self.name[part_a + 1 .. part_b],
+                        .name = self.name[part_b + 1 ..],
+                    };
+                },
             }
-            return .{ .num = num, .group_name = group_name, .name = rest_name };
         }
 
         pub fn get_group_name(self: Workspace) []const u8 {
