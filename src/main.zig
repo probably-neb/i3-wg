@@ -624,14 +624,13 @@ const I3 = struct {
     fn read_reply_expect_single_success_true(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Reply) !void {
         const expected_response = "[{\"success\":true}]";
         const expected_response_2 = "[{\"success\": true}]";
-        var buf: [expected_response_2.len + 1]u8 = undefined;
-        var buf_alloc = std.heap.FixedBufferAllocator.init(&buf);
-        const response = try read_reply(socket, buf_alloc.allocator(), expected_reply);
-        std.debug.print("response: '{s}' '{s}'\n", .{ response, expected_response });
+        var buf_alloc = std.heap.stackFallback(expected_response_2.len + 1, alloc);
+        const response = try read_reply(socket, buf_alloc.get(), expected_reply);
         const equals_expected_response = if (response.len >= expected_response_2.len) std.mem.eql(u8, response[0..expected_response_2.len], expected_response_2) else std.mem.eql(u8, response[0..expected_response.len], expected_response);
         if (!equals_expected_response) {
             // TODO: parse out error message using original alloc and log / return it
-            _ = alloc;
+            // can use stack fallback allocator instead of FixedBufferAllocator to get full message if longer than expected (i.e. has error) or create new buf & memcpy buf contents into it
+            std.debug.print("unexpected response: '{s}'\n", .{response});
             return error.UnsuccessfulResponse;
         }
         return;
