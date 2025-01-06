@@ -355,12 +355,22 @@ pub fn main() !void {
             if (std.mem.indexOfScalar(u8, workspace_user_name, ':')) |colon_pos| {
                 workspace_name = workspace_user_name[colon_pos + 1 ..];
                 workspace_group_name = workspace_user_name[0..colon_pos];
-                // var workspace_logical_group_index_max: u32 = 0;
-                for (workspaces) |workspace| {
+                const is_new_group = blk: for (workspaces) |workspace| {
                     if (std.mem.eql(u8, workspace_group_name, workspace.get_group_name())) {
-                        break;
+                        break :blk false;
                     }
-                } else return error.TODO_CannotCreateNewGroup;
+                } else true;
+
+                if (is_new_group) {
+                    var workspace_logical_group_index_max: u32 = 0;
+                    for (workspaces) |workspace| {
+                        const logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                        if (logical_group_index > workspace_logical_group_index_max) {
+                            workspace_logical_group_index_max = logical_group_index;
+                        }
+                    }
+                    workspace_logical_group_index = workspace_logical_group_index_max + 1;
+                }
             }
 
             const workspace_num_str = if (std.mem.lastIndexOfScalar(u8, workspace_name, ':')) |last_colon_pos|
