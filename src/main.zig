@@ -4,6 +4,11 @@ const Allocator = std.mem.Allocator;
 
 const INACTIVE_WORKSPACE_GROUP_FACTOR = 10_000;
 
+const build_mode = @import("builtin").mode;
+
+const SAFETY_CHECKS_ENABLE = build_mode == .Debug or build_mode == .ReleaseSafe;
+const DEBUG_ENABLE = build_mode == .Debug;
+
 const Cli_Commands = enum {
     Help,
     Switch_Active_Workspace_Group,
@@ -40,6 +45,7 @@ pub fn main() !void {
 
     const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
     const socket = try net.connectUnixSocket(socket_path);
+    defer socket.close();
 
     const cmd = if (args_iter.next()) |cmd_str| Cli_Commands.Map.get(cmd_str) orelse Cli_Commands.Help else Cli_Commands.Help;
     // TODO: suggest command in case of misspelling
@@ -89,17 +95,19 @@ pub fn main() !void {
                     std.debug.assert(group_logical_indices[group_name_index] == 0 or group_logical_indices[group_name_index] == logical_group_index);
                     group_logical_indices[group_name_index] = logical_group_index;
 
-                    if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR and active_group.len == 0) {
+                    if (is_in_active_group(workspace) and active_group.len == 0) {
                         active_group = group_name;
-                    } else if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
+                    } else if (is_in_active_group(workspace)) {
                         std.debug.assert(std.mem.eql(u8, group_name, active_group));
                     }
                 }
                 logical_group_count += 1;
                 std.debug.assert(logical_group_count >= group_names.len);
-                std.debug.assert(active_group.len > 0);
+                if (SAFETY_CHECKS_ENABLE) {
+                    check_active_group_consistency(workspaces, if (active_group.len > 0) active_group else null);
+                }
 
-                if (std.mem.eql(u8, active_group, new_workspace_group_name)) {
+                if (active_group.len > 0 and std.mem.eql(u8, active_group, new_workspace_group_name)) {
                     break :renaming;
                 }
 
@@ -119,13 +127,6 @@ pub fn main() !void {
                 for (pivot..logical_group_count) |i| {
                     new_logical_group_index_map[i] = @intCast(i);
                 }
-
-                // const NameInfo = struct {
-                //     num_actual: u32,
-                //     num_logical: u32,
-                //     name_group: []const u8,
-                //     name_workspace: []const u8,
-                // };
 
                 // FIXME: handle write or rename failure (easier if writes are batched and we have an intermediate buffer of name mappings)
                 // PERF: batch all rename calls
@@ -263,23 +264,12 @@ pub fn main() !void {
 
             const name = args_iter.next() orelse return error.MissingArgument;
 
-            var active_workspace_group: []const u8 = undefined;
-            var active_workspace_group_found = false;
+            // TODO: is no active workspace group actually an error here?
+            const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveWorkspaceGroup;
             // TODO:
             // - identify whether chosen workspace already exists (and is active workspace group)
             // - if it exists identify the name and switch to it
             // - else create number for it and format name before switching to it
-            for (workspaces) |workspace| {
-                if (workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
-                    if (active_workspace_group_found) {
-                        std.debug.assert(std.mem.eql(u8, workspace.get_group_name(), active_workspace_group));
-                    } else {
-                        active_workspace_group = workspace.get_group_name();
-                        active_workspace_group_found = true;
-                    }
-                }
-            }
-            if (!active_workspace_group_found) return error.NoActiveWorkspaceGroup;
 
             const workspace_num = blk: {
                 const name_num: ?u32 = std.fmt.parseUnsigned(u32, name, 10) catch null;
@@ -400,6 +390,38 @@ fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3.Workspace) !
         }
     }
     return names.items;
+}
+
+fn get_active_workspace_group(workspaces: []I3.Workspace) ?[]const u8 {
+    var active_workspace_group: ?[]const u8 = null;
+    for (workspaces) |workspace| {
+        if (is_in_active_group(workspace)) {
+            active_workspace_group = workspace.get_group_name();
+            break;
+        }
+    }
+    if (SAFETY_CHECKS_ENABLE) {
+        check_active_group_consistency(workspaces, active_workspace_group);
+    }
+
+    return active_workspace_group;
+}
+
+fn check_active_group_consistency(workspaces: []I3.Workspace, _active_workpace_group: ?[]const u8) void {
+    var active_workpace_group: ?[]const u8 = _active_workpace_group;
+    for (workspaces) |workspace| {
+        if (is_in_active_group(workspace)) {
+            if (active_workpace_group) |group| {
+                std.debug.assert(std.mem.eql(u8, workspace.get_group_name(), group));
+            } else {
+                active_workpace_group = workspace.get_group_name();
+            }
+        }
+    }
+}
+
+fn is_in_active_group(workspace: I3.Workspace) bool {
+    return workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR;
 }
 
 const I3 = struct {
