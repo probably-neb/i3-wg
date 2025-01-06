@@ -14,20 +14,18 @@ const Cli_Commands = enum {
     Switch_Active_Workspace_Group,
     Assign_Workspace_To_Group,
     Focus_Workspace_Select,
-    Move_Active_Container_To_Arbitrary_Workspace,
     Rename_Workspace,
     Focus_Workspace,
-    Move_Active_Container_To_Workspace_Number,
+    Move_Active_Container_To_Workspace,
     Pretty_List_Workspaces,
 
     pub const Map = std.StaticStringMap(@This()).initComptime(.{
         .{ "switch-active-workspace-group", .Switch_Active_Workspace_Group },
         .{ "assign-workspace-to-group", .Assign_Workspace_To_Group },
         .{ "focus-workspace-select", .Focus_Workspace_Select },
-        .{ "move-active-container-to-arbitrary-workspace", .Move_Active_Container_To_Arbitrary_Workspace },
         .{ "rename-workspace", .Rename_Workspace },
         .{ "focus-workspace", .Focus_Workspace },
-        .{ "move-active-container-to-workspace", .Move_Active_Container_To_Workspace_Number },
+        .{ "move-active-container-to-workspace", .Move_Active_Container_To_Workspace },
         .{ "dbg-pretty-print-workspaces", .Pretty_List_Workspaces },
         .{ "help", .Help },
         .{ "--help", .Help },
@@ -124,6 +122,7 @@ pub fn main() !void {
                 for (0..pivot) |i| {
                     new_logical_group_index_map[i] = @intCast(i + 1);
                 }
+
                 for (pivot..logical_group_count) |i| {
                     new_logical_group_index_map[i] = @intCast(i);
                 }
@@ -212,7 +211,6 @@ pub fn main() !void {
             }
             try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, writer);
             try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
-
             return;
         },
         .Assign_Workspace_To_Group => {
@@ -251,9 +249,6 @@ pub fn main() !void {
             const choice = maybe_choice.?;
             std.debug.print("choice: {s}\n", .{choice});
             // TODO: if choice contains ":" then create new workspace (and possibly group)
-            return error.NotImplemented;
-        },
-        .Move_Active_Container_To_Arbitrary_Workspace => {
             return error.NotImplemented;
         },
         .Rename_Workspace => {
@@ -315,8 +310,96 @@ pub fn main() !void {
 
             try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
         },
-        .Move_Active_Container_To_Workspace_Number => {
-            return error.NotImplemented;
+        .Move_Active_Container_To_Workspace => {
+            const workspaces = try I3.get_workspaces(socket, alloc);
+
+            const workspace_user_name = if (args_iter.next()) |arg| arg else blk: {
+                var active_group_workspaces = try std.ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+                var group_name_len_max: u64 = 0;
+                for (workspaces) |workspace| {
+                    if (is_in_active_group(workspace)) {
+                        const name_info = workspace.get_name_info();
+                        active_group_workspaces.appendAssumeCapacity(name_info);
+                        if (name_info.group_name.len > group_name_len_max) {
+                            group_name_len_max = name_info.group_name.len;
+                        }
+                    }
+                }
+
+                var selection = try Rofi.select_writer(alloc, "Workspace");
+                // TODO: Pango markup help text here
+
+                for (active_group_workspaces.items) |name_info| {
+                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| name_info.group_name.len);
+                    try selection.writer.writeAll(name_info.group_name);
+                    try selection.writer.writeByte(':');
+                    try selection.writer.writeAll(name_info.name);
+                    try selection.writer.writeByte('\n');
+                }
+                const choice = try selection.finish() orelse return;
+                std.debug.print("selection: {s}\n", .{choice});
+                break :blk choice;
+            };
+
+            const active_workspace_group = get_active_workspace_group(workspaces);
+
+            var workspace_name = workspace_user_name;
+            var workspace_group_name = active_workspace_group orelse "<default>";
+            var workspace_logical_group_index: u32 = 0;
+            var workspace_num = blk: for (workspaces) |workspace| {
+                if (workspace.focused) {
+                    break :blk workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+                }
+            } else 1;
+
+            if (std.mem.indexOfScalar(u8, workspace_user_name, ':')) |colon_pos| {
+                workspace_name = workspace_user_name[colon_pos + 1 ..];
+                workspace_group_name = workspace_user_name[0..colon_pos];
+                // var workspace_logical_group_index_max: u32 = 0;
+                for (workspaces) |workspace| {
+                    if (std.mem.eql(u8, workspace_group_name, workspace.get_group_name())) {
+                        break;
+                    }
+                } else return error.TODO_CannotCreateNewGroup;
+            }
+
+            const workspace_num_str = if (std.mem.lastIndexOfScalar(u8, workspace_name, ':')) |last_colon_pos|
+                workspace_name[last_colon_pos + 1 ..]
+            else
+                workspace_name;
+
+            if (std.fmt.parseInt(u32, workspace_num_str, 10) catch null) |num| {
+                workspace_num = num;
+            }
+
+            for (workspaces) |workspace| {
+                const name_info = workspace.get_name_info();
+                if (std.mem.eql(u8, name_info.group_name, workspace_group_name)) {
+                    workspace_logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                    break;
+                }
+            }
+            if (workspace_logical_group_index > 0) {
+                workspace_num += (INACTIVE_WORKSPACE_GROUP_FACTOR * workspace_logical_group_index);
+            }
+
+            const command_len =
+                "move container to workspace ".len +
+                workspace_name_parts_len(
+                workspace_num,
+                workspace_group_name,
+                workspace_name,
+            );
+            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
+            var writer = socket.writer();
+            try writer.writeAll("move container to workspace ");
+            try write_workspace_name_parts(
+                writer,
+                workspace_num,
+                workspace_group_name,
+                workspace_name,
+            );
+            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
         },
         .Pretty_List_Workspaces => {
             const workspaces = try I3.get_workspaces(socket, alloc);
@@ -361,6 +444,28 @@ fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !vo
         std.debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
         std.debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
+}
+
+fn write_workspace_name_parts(writer: anytype, num: u32, group_name: []const u8, name: []const u8) !void {
+    try std.fmt.formatInt(num, 10, .lower, .{}, writer);
+    try writer.writeByte(':');
+    if (group_name.len > 0 and !std.mem.eql(u8, group_name, "<default>")) {
+        try writer.writeAll(group_name);
+        try writer.writeByte(':');
+    }
+    try writer.writeAll(name);
+}
+
+fn workspace_name_parts_len(num: u32, group_name: []const u8, name: []const u8) u32 {
+    var len: u64 = 0;
+    len += count_digits(num);
+    len += ":".len;
+    if (group_name.len > 0 and !std.mem.eql(u8, group_name, "<default>")) {
+        len += group_name.len;
+        len += ":".len;
+    }
+    len += name.len;
+    return @intCast(len);
 }
 
 fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3.Workspace) ![][]const u8 {
@@ -676,7 +781,7 @@ const I3 = struct {
 
 const Rofi = struct {
     pub fn select(alloc: Allocator, label: []const u8, items: [][]const u8) !?u32 {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
+        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label, "-no-custom" };
         var child = std.process.Child.init(&args, alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
