@@ -1,6 +1,9 @@
 const std = @import("std");
 const net = std.net;
-const Allocator = std.mem.Allocator;
+const mem = std.mem;
+const debug = std.debug;
+const ArrayList = std.ArrayList;
+const Allocator = mem.Allocator;
 
 const INACTIVE_WORKSPACE_GROUP_FACTOR = 10_000;
 
@@ -13,7 +16,6 @@ const Cli_Commands = enum {
     Help,
     Switch_Active_Workspace_Group,
     Assign_Workspace_To_Group,
-    Focus_Workspace_Select,
     Rename_Workspace,
     Focus_Workspace,
     Move_Active_Container_To_Workspace,
@@ -22,7 +24,6 @@ const Cli_Commands = enum {
     pub const Map = std.StaticStringMap(@This()).initComptime(.{
         .{ "switch-active-workspace-group", .Switch_Active_Workspace_Group },
         .{ "assign-workspace-to-group", .Assign_Workspace_To_Group },
-        .{ "focus-workspace-select", .Focus_Workspace_Select },
         .{ "rename-workspace", .Rename_Workspace },
         .{ "focus-workspace", .Focus_Workspace },
         .{ "move-active-container-to-workspace", .Move_Active_Container_To_Workspace },
@@ -65,7 +66,7 @@ pub fn main() !void {
             // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
             const is_new = choice == .new;
 
-            const is_default = !is_new and std.mem.eql(u8, new_workspace_group_name, "<default>");
+            const is_default = !is_new and mem.eql(u8, new_workspace_group_name, "<default>");
 
             // ?TODO: consider if focused workspace is also in active workspace group, using it's number
             // TODO: if switching to exisiting group, and not doing current ws number, switch to lowest number in that group
@@ -87,25 +88,25 @@ pub fn main() !void {
 
                     const group_name = workspace.get_group_name();
                     const group_name_index = group_name_index: for (group_names, 0..) |existing_group_name, index| {
-                        if (std.mem.eql(u8, existing_group_name, group_name)) break :group_name_index index;
+                        if (mem.eql(u8, existing_group_name, group_name)) break :group_name_index index;
                     } else unreachable;
 
-                    std.debug.assert(group_logical_indices[group_name_index] == 0 or group_logical_indices[group_name_index] == logical_group_index);
+                    debug.assert(group_logical_indices[group_name_index] == 0 or group_logical_indices[group_name_index] == logical_group_index);
                     group_logical_indices[group_name_index] = logical_group_index;
 
                     if (is_in_active_group(workspace) and active_group.len == 0) {
                         active_group = group_name;
                     } else if (is_in_active_group(workspace)) {
-                        std.debug.assert(std.mem.eql(u8, group_name, active_group));
+                        debug.assert(mem.eql(u8, group_name, active_group));
                     }
                 }
                 logical_group_count += 1;
-                std.debug.assert(logical_group_count >= group_names.len);
+                debug.assert(logical_group_count >= group_names.len);
                 if (SAFETY_CHECKS_ENABLE) {
                     check_active_group_consistency(workspaces, if (active_group.len > 0) active_group else null);
                 }
 
-                if (active_group.len > 0 and std.mem.eql(u8, active_group, new_workspace_group_name)) {
+                if (active_group.len > 0 and mem.eql(u8, active_group, new_workspace_group_name)) {
                     break :renaming;
                 }
 
@@ -141,9 +142,9 @@ pub fn main() !void {
 
                         const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
                         const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                        const is_group_new_active = !is_new and std.mem.eql(u8, info.group_name, new_workspace_group_name);
+                        const is_group_new_active = !is_new and mem.eql(u8, info.group_name, new_workspace_group_name);
                         const num_logical_new = if (is_group_new_active) 0 else new_logical_group_index_map[num_logical_orig];
-                        std.debug.print(
+                        debug.print(
                             "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
                             .{
                                 workspace.name,
@@ -157,7 +158,7 @@ pub fn main() !void {
 
                         const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
 
-                        const is_group_default = std.mem.eql(u8, info.group_name, "<default>");
+                        const is_group_default = mem.eql(u8, info.group_name, "<default>");
 
                         const command_len =
                             "rename workspace ".len +
@@ -216,97 +217,118 @@ pub fn main() !void {
         .Assign_Workspace_To_Group => {
             return error.NotImplemented;
         },
-        .Focus_Workspace_Select => {
-            const workspaces = try I3.get_workspaces(socket, alloc);
-            std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
-            var names = try alloc.alloc(I3.Workspace.NameInfo, workspaces.len);
-            var group_name_len_max: u64 = 0;
-            var name_len_max: u64 = 0;
-
-            for (workspaces, 0..) |workspace, index| {
-                const pair = I3.Workspace.get_name_info(workspace);
-                if (pair.group_name.len > group_name_len_max) {
-                    group_name_len_max = pair.group_name.len;
-                }
-                if (pair.name.len > name_len_max) {
-                    name_len_max = pair.name.len;
-                }
-                names[index] = pair;
-            }
-
-            var selection = try Rofi.select_writer(alloc, "Workspace");
-            // TODO: Pango markup help text here
-
-            for (names) |pair| {
-                try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
-                try selection.writer.writeAll(pair.group_name);
-                try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
-                try selection.writer.writeAll(pair.name);
-                try selection.writer.writeByte('\n');
-            }
-            const maybe_choice = try selection.finish();
-            if (maybe_choice == null) return;
-            const choice = maybe_choice.?;
-            std.debug.print("choice: {s}\n", .{choice});
-            // TODO: if choice contains ":" then create new workspace (and possibly group)
-            return error.NotImplemented;
-        },
         .Rename_Workspace => {
             return error.NotImplemented;
         },
         .Focus_Workspace => {
             const workspaces = try I3.get_workspaces(socket, alloc);
 
-            const name = args_iter.next() orelse return error.MissingArgument;
-
             // TODO: is no active workspace group actually an error here?
-            const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveWorkspaceGroup;
+            // FIXME: how to handle no active group and no group name...
+            const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
+
+            const name = if (args_iter.next()) |arg| arg else blk: {
+                mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
+                var names = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+                var group_name_len_max: u64 = 0;
+                var name_len_max: u64 = 0;
+
+                for (workspaces) |workspace| {
+                    const pair = I3.Workspace.get_name_info(workspace);
+                    if (mem.eql(u8, pair.group_name, active_workspace_group)) {
+                        if (pair.group_name.len > group_name_len_max) {
+                            group_name_len_max = pair.group_name.len;
+                        }
+                        if (pair.name.len > name_len_max) {
+                            name_len_max = pair.name.len;
+                        }
+                        names.appendAssumeCapacity(pair);
+                    }
+                }
+
+                var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
+                // TODO: Pango markup help text here
+
+                for (names.items) |pair| {
+                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
+                    try selection.writer.writeAll(pair.group_name);
+                    try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
+                    try selection.writer.writeAll(pair.name);
+                    try selection.writer.writeByte('\n');
+                }
+                const maybe_choice = try selection.finish();
+                if (maybe_choice == null) return;
+                const choice = maybe_choice.?;
+                var choice_iter = mem.tokenizeScalar(u8, choice, ' ');
+                _ = choice_iter.next();
+                const name = choice_iter.rest();
+                if (name.len == 0) {
+                    return error.InvalidChoice;
+                }
+                break :blk name;
+            };
+            debug.print("name = {s}\n", .{name});
             // TODO:
             // - identify whether chosen workspace already exists (and is active workspace group)
-            // - if it exists identify the name and switch to it
+            // - if it exists identify he name and switch to it
             // - else create number for it and format name before switching to it
 
-            const workspace_num = blk: {
-                const name_num: ?u32 = std.fmt.parseUnsigned(u32, name, 10) catch null;
-                if (name_num != null and name_num.? < 10) {
-                    break :blk name_num.?;
-                }
-                for (workspaces) |workspace| {
-                    const info = workspace.get_name_info();
-                    if (std.mem.eql(u8, info.name, name)) {
-                        break :blk workspace.num;
+            const workspace_name = blk: {
+                // TODO: clone this logic (extract to fn?) to move container to workspace
+                const maybe_num = std.fmt.parseInt(u32, name, 10) catch null;
+
+                const group_num_max = gnm: {
+                    var group_num_max: u32 = 0;
+                    for (workspaces) |workspace| {
+                        const is_in_active_workspace_group = is_in_active_group(workspace);
+                        if (is_in_active_workspace_group and workspace.num <= 10 and workspace.num > group_num_max) {
+                            group_num_max = workspace.num;
+                        }
+                    }
+                    break :gnm group_num_max;
+                };
+
+                var workspace_name = try ArrayList(u8).initCapacity(alloc, 3 + active_workspace_group.len + name.len);
+                const writer = workspace_name.writer();
+
+                if (maybe_num) |num| {
+                    debug.print("is num\n", .{});
+                    if (num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
+                        for (workspaces) |workspace| {
+                            const is_in_active_workspace_group = is_in_active_group(workspace);
+                            if (is_in_active_workspace_group and num == workspace.num) {
+                                debug.print("workspace '{s}' exists\n", .{workspace.name});
+                                workspace_name.deinit();
+                                break :blk workspace.name;
+                            }
+                        } else {
+                            const workspace_num = if (num < 10) num else group_num_max + 1;
+                            try write_workspace_name_parts(writer, workspace_num, active_workspace_group, name);
+                            debug.print("creating workspace named '{s}'\n", .{workspace_name.items});
+                            break :blk workspace_name.items;
+                        }
+                    }
+                } else {
+                    // otherwise look for a workspace named $name and if we find it return it so we get the workspace number correct
+                    for (workspaces) |workspace| {
+                        const is_in_active_workspace_group = is_in_active_group(workspace);
+                        const name_info = workspace.get_name_info();
+                        if (is_in_active_workspace_group and mem.eql(u8, name_info.name, name)) {
+                            break :blk workspace.name;
+                        }
                     }
                 }
-                var group_num_max: u32 = 0;
-                for (workspaces) |workspace| {
-                    if (std.mem.eql(u8, workspace.get_group_name(), active_workspace_group) and workspace.num > group_num_max) {
-                        group_num_max = workspace.num;
-                    }
-                }
-                break :blk group_num_max + 1;
+
+                debug.print("creating non-num workspace named '{s}'\n", .{workspace_name.items});
+                try write_workspace_name_parts(writer, group_num_max + 1, active_workspace_group, name);
+                break :blk workspace_name.items;
             };
 
-            const workspace_group_name = if (std.mem.eql(u8, active_workspace_group, "<default>")) "" else active_workspace_group;
-
-            const command_len =
-                "workspace ".len +
-                count_digits(workspace_num) +
-                ":".len +
-                workspace_group_name.len +
-                (if (workspace_group_name.len == 0) 0 else ":".len) +
-                name.len;
-
+            const command_len = "workspace ".len + workspace_name.len;
             try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
             var writer = socket.writer();
-
             try writer.writeAll("workspace ");
-            try std.fmt.formatInt(workspace_num, 10, .lower, .{}, writer);
-            try writer.writeByte(':');
-            if (workspace_group_name.len > 0) {
-                try writer.writeAll(workspace_group_name);
-                try writer.writeByte(':');
-            }
-            try socket.writeAll(name);
+            try writer.writeAll(workspace_name);
 
             try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
         },
@@ -314,7 +336,7 @@ pub fn main() !void {
             const workspaces = try I3.get_workspaces(socket, alloc);
 
             const workspace_user_name = if (args_iter.next()) |arg| arg else blk: {
-                var active_group_workspaces = try std.ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+                var active_group_workspaces = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
                 var group_name_len_max: u64 = 0;
                 for (workspaces) |workspace| {
                     if (is_in_active_group(workspace)) {
@@ -326,7 +348,7 @@ pub fn main() !void {
                     }
                 }
 
-                var selection = try Rofi.select_writer(alloc, "Workspace");
+                var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
 
                 for (active_group_workspaces.items) |name_info| {
@@ -337,7 +359,7 @@ pub fn main() !void {
                     try selection.writer.writeByte('\n');
                 }
                 const choice = try selection.finish() orelse return;
-                std.debug.print("selection: {s}\n", .{choice});
+                debug.print("selection: {s}\n", .{choice});
                 break :blk choice;
             };
 
@@ -352,11 +374,11 @@ pub fn main() !void {
                 }
             } else 1;
 
-            if (std.mem.indexOfScalar(u8, workspace_user_name, ':')) |colon_pos| {
+            if (mem.indexOfScalar(u8, workspace_user_name, ':')) |colon_pos| {
                 workspace_name = workspace_user_name[colon_pos + 1 ..];
                 workspace_group_name = workspace_user_name[0..colon_pos];
                 const is_new_group = blk: for (workspaces) |workspace| {
-                    if (std.mem.eql(u8, workspace_group_name, workspace.get_group_name())) {
+                    if (mem.eql(u8, workspace_group_name, workspace.get_group_name())) {
                         break :blk false;
                     }
                 } else true;
@@ -373,18 +395,13 @@ pub fn main() !void {
                 }
             }
 
-            const workspace_num_str = if (std.mem.lastIndexOfScalar(u8, workspace_name, ':')) |last_colon_pos|
-                workspace_name[last_colon_pos + 1 ..]
-            else
-                workspace_name;
-
-            if (std.fmt.parseInt(u32, workspace_num_str, 10) catch null) |num| {
+            if (parse_workspace_name_num(workspace_name)) |num| {
                 workspace_num = num;
             }
 
             for (workspaces) |workspace| {
                 const name_info = workspace.get_name_info();
-                if (std.mem.eql(u8, name_info.group_name, workspace_group_name)) {
+                if (mem.eql(u8, name_info.group_name, workspace_group_name)) {
                     workspace_logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
                     break;
                 }
@@ -424,42 +441,42 @@ fn pretty_list_workspaces(alloc: Allocator, base_workspaces: []I3.Workspace) !vo
     }
     const workspaces = try alloc.dupe(I3.Workspace, base_workspaces);
     defer alloc.free(workspaces);
-    std.mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_output_less_than);
+    mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_output_less_than);
     var ouput_start_index: u32 = 0;
     var output_end_index: u32 = 1;
     var found_multiple_outputs = false;
     while (output_end_index < workspaces.len) : (output_end_index += 1) {
         const output_a = workspaces[output_end_index - 1].output;
         const output_b = workspaces[output_end_index].output;
-        if (!std.mem.eql(u8, output_a, output_b)) {
-            std.mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+        if (!mem.eql(u8, output_a, output_b)) {
+            mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
             ouput_start_index = output_end_index;
             found_multiple_outputs = true;
         }
     }
-    std.mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+    mem.sort(I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
 
     var output = workspaces[0].output;
     const prefix = if (found_multiple_outputs) blk: {
-        std.debug.print("{s}:\n", .{output});
+        debug.print("{s}:\n", .{output});
         break :blk "   ";
     } else "";
     for (workspaces) |workspace| {
-        if (found_multiple_outputs and !std.mem.eql(u8, workspace.output, output)) {
-            std.debug.print("{s}:\n", .{workspace.output});
+        if (found_multiple_outputs and !mem.eql(u8, workspace.output, output)) {
+            debug.print("{s}:\n", .{workspace.output});
             output = workspace.output;
         }
-        std.debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
-        std.debug.print("{s}  group: {s}\n", .{ prefix, workspace.get_group_name() });
-        std.debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
-        std.debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
+        debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
+        debug.print("{s}  group: {s}\n", .{ prefix, workspace.get_group_name() });
+        debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
+        debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
 }
 
 fn write_workspace_name_parts(writer: anytype, num: u32, group_name: []const u8, name: []const u8) !void {
     try std.fmt.formatInt(num, 10, .lower, .{}, writer);
     try writer.writeByte(':');
-    if (group_name.len > 0 and !std.mem.eql(u8, group_name, "<default>")) {
+    if (group_name.len > 0 and !mem.eql(u8, group_name, "<default>")) {
         try writer.writeAll(group_name);
         try writer.writeByte(':');
     }
@@ -470,7 +487,7 @@ fn workspace_name_parts_len(num: u32, group_name: []const u8, name: []const u8) 
     var len: u64 = 0;
     len += count_digits(num);
     len += ":".len;
-    if (group_name.len > 0 and !std.mem.eql(u8, group_name, "<default>")) {
+    if (group_name.len > 0 and !mem.eql(u8, group_name, "<default>")) {
         len += group_name.len;
         len += ":".len;
     }
@@ -479,25 +496,25 @@ fn workspace_name_parts_len(num: u32, group_name: []const u8, name: []const u8) 
 }
 
 fn extract_workspace_group_names(alloc: Allocator, workspaces: []I3.Workspace) ![][]const u8 {
-    var names = try std.ArrayList([]const u8).initCapacity(alloc, workspaces.len);
+    var names = try ArrayList([]const u8).initCapacity(alloc, workspaces.len);
     for (workspaces) |workspace| {
         const group_name = workspace.get_group_name();
         names.appendAssumeCapacity(group_name);
     }
     {
-        std.mem.sort(
+        mem.sort(
             []const u8,
             names.items,
             {},
             struct {
                 fn less_than(_: void, a: []const u8, b: []const u8) bool {
-                    return std.mem.lessThan(u8, a, b);
+                    return mem.lessThan(u8, a, b);
                 }
             }.less_than,
         );
         var i: u32 = 1;
         while (i < names.items.len) {
-            if (std.mem.eql(u8, names.items[i - 1], names.items[i])) {
+            if (mem.eql(u8, names.items[i - 1], names.items[i])) {
                 _ = names.orderedRemove(i);
             } else {
                 i += 1;
@@ -527,7 +544,7 @@ fn check_active_group_consistency(workspaces: []I3.Workspace, _active_workpace_g
     for (workspaces) |workspace| {
         if (is_in_active_group(workspace)) {
             if (active_workpace_group) |group| {
-                std.debug.assert(std.mem.eql(u8, workspace.get_group_name(), group));
+                debug.assert(mem.eql(u8, workspace.get_group_name(), group));
             } else {
                 active_workpace_group = workspace.get_group_name();
             }
@@ -537,6 +554,14 @@ fn check_active_group_consistency(workspaces: []I3.Workspace, _active_workpace_g
 
 fn is_in_active_group(workspace: I3.Workspace) bool {
     return workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR;
+}
+
+fn parse_workspace_name_num(workspace_name: []const u8) ?u32 {
+    var name = workspace_name;
+    if (mem.lastIndexOfScalar(u8, name, ':')) |colon_pos| {
+        name = name[colon_pos + 1 ..];
+    }
+    return std.fmt.parseInt(u32, name, 10) catch null;
 }
 
 const I3 = struct {
@@ -571,16 +596,16 @@ const I3 = struct {
         focused: bool,
 
         pub fn sort_by_output_less_than(_: void, a: Workspace, b: Workspace) bool {
-            return std.mem.lessThan(u8, a.output, b.output);
+            return mem.lessThan(u8, a.output, b.output);
         }
 
         pub fn sort_by_name_less_than(_: void, a: Workspace, b: Workspace) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
+            return mem.lessThan(u8, a.name, b.name);
         }
 
         pub fn sort_by_group_name_less_than(_: void, a: Workspace, b: Workspace) bool {
             // TODO: consider caching group_names
-            return std.mem.lessThan(u8, a.get_group_name(), b.get_group_name());
+            return mem.lessThan(u8, a.get_group_name(), b.get_group_name());
         }
 
         // PERF: rewrite
@@ -588,10 +613,10 @@ const I3 = struct {
             const info_a = a.get_name_info();
             const info_b = b.get_name_info();
 
-            if (!std.mem.eql(u8, info_a.group_name, info_b.group_name)) {
-                return std.mem.lessThan(u8, info_a.group_name, info_b.group_name);
+            if (!mem.eql(u8, info_a.group_name, info_b.group_name)) {
+                return mem.lessThan(u8, info_a.group_name, info_b.group_name);
             }
-            return std.mem.lessThan(u8, info_a.name, info_b.name);
+            return mem.lessThan(u8, info_a.name, info_b.name);
         }
 
         const NameInfo = struct {
@@ -611,12 +636,12 @@ const I3 = struct {
             switch (count_colons) {
                 0 => return .{ .num = self.name, .group_name = "<default>", .name = self.name },
                 1 => {
-                    const part = std.mem.lastIndexOfScalar(u8, self.name, ':').?;
+                    const part = mem.lastIndexOfScalar(u8, self.name, ':').?;
                     return .{ .num = self.name[0..part], .group_name = "<default>", .name = self.name[part + 1 ..] };
                 },
                 else => {
-                    const part_a = std.mem.indexOfScalar(u8, self.name, ':').?;
-                    const part_b = std.mem.indexOfScalarPos(u8, self.name, part_a + 1, ':').?;
+                    const part_a = mem.indexOfScalar(u8, self.name, ':').?;
+                    const part_b = mem.indexOfScalarPos(u8, self.name, part_a + 1, ':').?;
                     return .{
                         .num = self.name[0..part_a],
                         .group_name = self.name[part_a + 1 .. part_b],
@@ -627,7 +652,7 @@ const I3 = struct {
         }
 
         pub fn get_group_name(self: Workspace) []const u8 {
-            var section_iter = std.mem.tokenizeScalar(u8, self.name, ':');
+            var section_iter = mem.tokenizeScalar(u8, self.name, ':');
             _ = section_iter.next();
             var group_name = section_iter.next() orelse "<default>";
             if (section_iter.next() == null) {
@@ -660,7 +685,7 @@ const I3 = struct {
         const response = try std.json.parseFromSlice([]Workspace, alloc, response_full, .{
             .ignore_unknown_fields = true,
         });
-        // std.debug.print("{s}\n", .{response_full});
+        // debug.print("{s}\n", .{response_full});
         return response.value;
     }
 
@@ -671,7 +696,7 @@ const I3 = struct {
         const response = try read_reply(socket, alloc, .COMMAND);
         alloc.free(response);
 
-        std.debug.print("{s}\n", .{response});
+        debug.print("{s}\n", .{response});
     }
 
     fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
@@ -719,23 +744,23 @@ const I3 = struct {
 
     fn exec_command(socket: net.Stream, command: Command, msg: []const u8) !void {
         try socket.writeAll(MAGIC_STRING);
-        try socket.writeAll(&std.mem.toBytes(@as(i32, @intCast(msg.len))));
-        try socket.writeAll(&std.mem.toBytes(@as(i32, @intFromEnum(command))));
+        try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg.len))));
+        try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
         try socket.writeAll(msg);
     }
 
     fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !void {
         try socket.writeAll(MAGIC_STRING);
-        try socket.writeAll(&std.mem.toBytes(@as(i32, @intCast(msg_len))));
-        try socket.writeAll(&std.mem.toBytes(@as(i32, @intFromEnum(command))));
+        try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg_len))));
+        try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
     }
 
-    fn read_reply(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Reply) ![]const u8 {
+    fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
         // PERF: make initial buf with [I3_MAGIC_STRING.len + 4 + 4]u8 to cut number of read calls
         {
             var magic_buffer: [MAGIC_STRING.len]u8 = undefined;
             const magic_read_count = try socket.readAtLeast(&magic_buffer, MAGIC_STRING.len);
-            if (magic_read_count != MAGIC_STRING.len or !std.mem.eql(u8, MAGIC_STRING, &magic_buffer)) {
+            if (magic_read_count != MAGIC_STRING.len or !mem.eql(u8, MAGIC_STRING, &magic_buffer)) {
                 return error.InvalidMagic;
             }
         }
@@ -773,16 +798,16 @@ const I3 = struct {
         return message_buffer;
     }
 
-    fn read_reply_expect_single_success_true(socket: net.Stream, alloc: std.mem.Allocator, expected_reply: Reply) !void {
+    fn read_reply_expect_single_success_true(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !void {
         const expected_response = "[{\"success\":true}]";
         const expected_response_2 = "[{\"success\": true}]";
         var buf_alloc = std.heap.stackFallback(expected_response_2.len + 1, alloc);
         const response = try read_reply(socket, buf_alloc.get(), expected_reply);
-        const equals_expected_response = if (response.len >= expected_response_2.len) std.mem.eql(u8, response[0..expected_response_2.len], expected_response_2) else std.mem.eql(u8, response[0..expected_response.len], expected_response);
+        const equals_expected_response = if (response.len >= expected_response_2.len) mem.eql(u8, response[0..expected_response_2.len], expected_response_2) else mem.eql(u8, response[0..expected_response.len], expected_response);
         if (!equals_expected_response) {
             // TODO: parse out error message using original alloc and log / return it
             // can use stack fallback allocator instead of FixedBufferAllocator to get full message if longer than expected (i.e. has error) or create new buf & memcpy buf contents into it
-            std.debug.print("unexpected response: '{s}'\n", .{response});
+            debug.print("unexpected response: '{s}'\n", .{response});
             return error.UnsuccessfulResponse;
         }
         return;
@@ -802,7 +827,7 @@ const Rofi = struct {
         }
         // child.stdin.?.close();
         const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
-        const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+        const result = mem.trim(u8, result_full, &std.ascii.whitespace);
 
         _ = try child.wait();
 
@@ -811,7 +836,7 @@ const Rofi = struct {
         }
 
         for (items, 0..) |item, index| {
-            if (std.mem.eql(u8, result, item)) {
+            if (mem.eql(u8, result, item)) {
                 return @intCast(index);
             }
         }
@@ -822,11 +847,11 @@ const Rofi = struct {
     const SelectWriterIntermediate = struct {
         child: std.process.Child,
         writer: std.fs.File.Writer,
-        alloc: std.mem.Allocator,
+        alloc: mem.Allocator,
 
         pub fn finish(self: *SelectWriterIntermediate) !?[]const u8 {
             const result_full = try self.child.stdout.?.readToEndAlloc(self.alloc, std.math.maxInt(usize));
-            const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+            const result = mem.trim(u8, result_full, &std.ascii.whitespace);
 
             _ = try self.child.wait();
 
@@ -839,6 +864,15 @@ const Rofi = struct {
     };
 
     pub fn select_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
+        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label, "-no-custom" };
+        var child = std.process.Child.init(&args, alloc);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        try child.spawn();
+        return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
+    }
+
+    pub fn select_or_new_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
         const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
         var child = std.process.Child.init(&args, alloc);
         child.stdin_behavior = .Pipe;
@@ -859,7 +893,7 @@ const Rofi = struct {
         }
         // child.stdin.?.close();
         const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
-        const result = std.mem.trim(u8, result_full, &std.ascii.whitespace);
+        const result = mem.trim(u8, result_full, &std.ascii.whitespace);
 
         _ = try child.wait();
 
@@ -868,7 +902,7 @@ const Rofi = struct {
         }
 
         for (items, 0..) |item, index| {
-            if (std.mem.eql(u8, result, item)) {
+            if (mem.eql(u8, result, item)) {
                 return .{ .existing = @intCast(index) };
             }
         }
@@ -878,31 +912,31 @@ const Rofi = struct {
 
 fn split_N_times(comptime T: type, buf: []const T, needle: T, comptime N: comptime_int) [N][]const T {
     var elems: [N][]const T = undefined;
-    var iter = std.mem.tokenizeScalar(T, buf, needle);
+    var iter = mem.tokenizeScalar(T, buf, needle);
     inline for (0..N) |i| {
-        elems[i] = iter.next() orelse std.debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
+        elems[i] = iter.next() orelse debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
     }
     if (iter.next()) |_| {
-        std.debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
+        debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
     }
     return elems;
 }
 
 fn split_N_times_seq(comptime T: type, buf: []const T, needle: []const T, comptime N: comptime_int) [N][]const T {
     var elems: [N][]const T = undefined;
-    var iter = std.mem.tokenizeSequence(T, buf, needle);
+    var iter = mem.tokenizeSequence(T, buf, needle);
     inline for (0..N) |i| {
-        elems[i] = iter.next() orelse std.debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
+        elems[i] = iter.next() orelse debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
     }
     if (iter.next()) |_| {
-        std.debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
+        debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
     }
     return elems;
 }
 
 fn strip_prefix_exact(comptime T: type, buf: []const T, prefix: []const T) []const T {
-    std.debug.assert(buf.len > prefix.len);
-    std.debug.assert(std.mem.eql(T, buf[0..prefix.len], prefix));
+    debug.assert(buf.len > prefix.len);
+    debug.assert(mem.eql(T, buf[0..prefix.len], prefix));
     return buf[prefix.len..];
 }
 
