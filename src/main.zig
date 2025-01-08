@@ -215,7 +215,63 @@ pub fn main() !void {
             return;
         },
         .Assign_Workspace_To_Group => {
-            return error.NotImplemented;
+            const workspaces = try I3.get_workspaces(socket, alloc);
+            const active_workspace = blk: {
+                for (workspaces) |workspace| {
+                    if (workspace.focused) {
+                        break :blk workspace;
+                    }
+                } else unreachable;
+            };
+
+            const group_name = if (args_iter.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
+                const group_names = try extract_workspace_group_names(alloc, workspaces);
+                // TODO: allow creating new group
+                const group_name_idx = try Rofi.select(alloc, "Workspace Group", group_names) orelse return;
+
+                const group_name = group_names[group_name_idx];
+                break :blk group_name;
+            };
+
+            const group_logical_num = blk: for (workspaces) |workspace| {
+                if (std.mem.eql(u8, workspace.get_group_name(), group_name)) {
+                    break :blk @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                }
+            } else unreachable;
+
+            const active_workspace_name_info = active_workspace.get_name_info();
+
+            const active_workspace_actual_num = active_workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+
+            const workspace_with_num_exists = blk: for (workspaces) |workspace| {
+                const workspace_actual_num = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+                const is_actual_num_same = workspace_actual_num == active_workspace_actual_num;
+                const is_group_name_same = std.mem.eql(u8, workspace.get_group_name(), group_name);
+                if (is_actual_num_same or is_group_name_same) {
+                    break :blk true;
+                }
+            } else false;
+
+            if (workspace_with_num_exists) {
+                return error.TODO_Copying_Over_Containers;
+            }
+
+            const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + active_workspace_actual_num;
+
+            try I3.exec_command_len(
+                socket,
+                .RUN_COMMAND,
+                @intCast("rename workspace ".len +
+                    active_workspace.name.len +
+                    " to ".len +
+                    workspace_name_parts_len(active_workspace_num, group_name, active_workspace_name_info.name)),
+            );
+            var writer = socket.writer();
+            try writer.writeAll("rename workspace ");
+            try writer.writeAll(active_workspace.name);
+            try writer.writeAll(" to ");
+            try write_workspace_name_parts(writer, active_workspace_num, group_name, active_workspace_name_info.name);
+            return;
         },
         .Rename_Workspace => {
             return error.NotImplemented;
