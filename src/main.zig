@@ -226,11 +226,22 @@ pub fn main() !void {
 
             const group_name = if (args_iter.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
                 const group_names = try extract_workspace_group_names(alloc, workspaces);
+                const choice = try Rofi.select_or_new(alloc, "Workspace Group", group_names) orelse return;
+                switch (choice) {
+                    .new => |_| return error.TODO_Allow_New_Group,
+                    .existing => |group_name_idx| break :blk group_names[group_name_idx],
+                }
+                // const random_group_names = []const u8{"foo", "bar", "baz"};
                 // TODO: allow creating new group
-                const group_name_idx = try Rofi.select(alloc, "Workspace Group", group_names) orelse return;
+                // var select = try Rofi.select_writer(alloc, "Workspace Group");
+                // for (group_names) |group_name| {
+                //     try select.writer.writeAll(group_name);
+                //     try select.writer.writeByte('\n');
+                // }
+                // const group_name = try select.finish() orelse return;
 
-                const group_name = group_names[group_name_idx];
-                break :blk group_name;
+                // const group_name = group_names[group_name_idx];
+                // break :blk group_name;
             };
 
             const group_logical_num = blk: for (workspaces) |workspace| {
@@ -247,7 +258,7 @@ pub fn main() !void {
                 const workspace_actual_num = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
                 const is_actual_num_same = workspace_actual_num == active_workspace_actual_num;
                 const is_group_name_same = std.mem.eql(u8, workspace.get_group_name(), group_name);
-                if (is_actual_num_same or is_group_name_same) {
+                if (is_actual_num_same and is_group_name_same) {
                     break :blk true;
                 }
             } else false;
@@ -284,22 +295,20 @@ pub fn main() !void {
             const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
 
             const name = if (args_iter.next()) |arg| arg else blk: {
-                mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_group_name_and_name_num_less_than);
+                mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
                 var names = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
                 var group_name_len_max: u64 = 0;
                 var name_len_max: u64 = 0;
 
                 for (workspaces) |workspace| {
                     const pair = I3.Workspace.get_name_info(workspace);
-                    if (mem.eql(u8, pair.group_name, active_workspace_group)) {
-                        if (pair.group_name.len > group_name_len_max) {
-                            group_name_len_max = pair.group_name.len;
-                        }
-                        if (pair.name.len > name_len_max) {
-                            name_len_max = pair.name.len;
-                        }
-                        names.appendAssumeCapacity(pair);
+                    if (pair.group_name.len > group_name_len_max) {
+                        group_name_len_max = pair.group_name.len;
                     }
+                    if (pair.name.len > name_len_max) {
+                        name_len_max = pair.name.len;
+                    }
+                    names.appendAssumeCapacity(pair);
                 }
 
                 var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
@@ -675,6 +684,19 @@ const I3 = struct {
             return mem.lessThan(u8, info_a.name, info_b.name);
         }
 
+        pub fn sort_by_logical_num_and_name_less_than(_: void, a: Workspace, b: Workspace) bool {
+            const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+            const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+            if (a_logical != b_logical) {
+                return a_logical < b_logical;
+            }
+
+            const a_name_info = a.get_name_info();
+            const b_name_info = b.get_name_info();
+
+            return mem.lessThan(u8, a_name_info.name, b_name_info.name);
+        }
+
         const NameInfo = struct {
             num: ?[]const u8,
             group_name: []const u8,
@@ -872,7 +894,7 @@ const I3 = struct {
 
 const Rofi = struct {
     pub fn select(alloc: Allocator, label: []const u8, items: [][]const u8) !?u32 {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label, "-no-custom" };
+        const args = [_][]const u8{ "rofi", "-dmenu", "-no-custom", "-p", label };
         var child = std.process.Child.init(&args, alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
@@ -920,7 +942,7 @@ const Rofi = struct {
     };
 
     pub fn select_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label, "-no-custom" };
+        const args = [_][]const u8{ "rofi", "-dmenu", "-no-custom", "-p", label };
         var child = std.process.Child.init(&args, alloc);
         child.stdin_behavior = .Pipe;
         child.stdout_behavior = .Pipe;
