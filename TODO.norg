@@ -5,11 +5,18 @@
 
 ** Features
    - ( )
-   -- ( ) Create new workspace group
-   -- ( ) Move workspaace to different group
+   -- (x) Create new workspace group
+   -- (x) Move workspaace to different group
    -- ( ) <meta+w> focus arbitrary group with rofi
+   --- (x) focus in group
+   --- ( ) focus out group
    -- ( ) Rename grouped workspace (wrapper around `bindsym $mod+r exec i3-input -F 'rename workspace to "%s"' -P 'New name: '`)
-   -- ( ) Sorting groups + sorting workspaces within groups
-   --- ( ) inter+intra group sorting
-   --- ( ) use number for sorting active workspace group to front and within workspace in order
-   --- ( ) ensure if workspace name is number then it's order matches it's number
+   -- (x) Sorting groups + sorting workspaces within groups
+   --- (x) inter+intra group sorting
+   --- (x) use number for sorting active workspace group to front and within workspace in order
+   --- (x) ensure if workspace name is number then it's order matches it's number
+   -- (x) Combine all "arbitrary"/"select" commands with "_number" style commands, making it so if argument is passed that is what is used, otherwise select menu is shown
+   -- ( ) Make workspace name info cached in workspace for perf
+   -- ( ) Consolidate creating new group that is not active logic
+   -- (?) `--follow` flag for commands that should allow creating groups to activate those groups?
+   -- ( ) save group command? (get + parse tree -> save to sqlite or something)
