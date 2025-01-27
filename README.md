@@ -12,13 +12,13 @@ I was a big fan of `i3-workspace-groups` and used it for over a year. However, I
 
 Those being:
 
-A. Because the original project was implemented in python, system Python updates often broke it.
-B. The system it used to group workspaces often broke in weird and opaque ways. E.g.
+1. Because the original project was implemented in python, system Python updates often broke it.
+2. The system it used to group workspaces often broke in weird and opaque ways. E.g.
     - The initial default workspaces i3 created would never be used. If I started working in workspace 1, focusing workspace 1 would focus a new workspace also named 1 instead of the one I was already working in
     - Often groups and workspaces would not be ordered correctly, i.e. `work:1` would appear after `work:2`. And groups would not always be ordered by last used.
-C. The performance while fast enough, was often noticeably slow. Especially after creating this rewrite, I notice how much snappier switching groups and workspaces is
-D. I had a few additional features I felt would be useful in my workflow, however, attempting to add them to the original in a fork ended up being far more complicated than anticipated. As the code was hard to understand and reason about.
-E. Inflexibility. Many commands were not as flexible as I felt they should be, and many did not behave as I would expect them to E.g.
+3. The performance while fast enough, was often noticeably slow. Especially after creating this rewrite, I notice how much snappier switching groups and workspaces is
+4. I had a few additional features I felt would be useful in my workflow, however, attempting to add them to the original in a fork ended up being far more complicated than anticipated. As the code was hard to understand and reason about.
+5. Inflexibility. Many commands were not as flexible as I felt they should be, and many did not behave as I would expect them to E.g.
     - Unable to move a container/workspace around in a non active group
     - Unable to move containers/worksapaces to a workspace in a different group that already existed (and contained other containers)
 
