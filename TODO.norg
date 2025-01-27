@@ -18,5 +18,11 @@
    -- (x) Combine all "arbitrary"/"select" commands with "_number" style commands, making it so if argument is passed that is what is used, otherwise select menu is shown
    -- ( ) Make workspace name info cached in workspace for perf
    -- ( ) Consolidate creating new group that is not active logic
-   -- (?) `--follow` flag for commands that should allow creating groups to activate those groups?
+   -- ( ) `--follow` flag for commands that should allow creating groups to activate those groups?
+   --- ( ) for container based commands - do container manipulation then switch to container
+   --- ( ) for group based commands - do group manipulation then switch to group (possibly try to switch to container in group)
    -- ( ) save group command? (get + parse tree -> save to sqlite or something)
+   -- ( ) delete workspace group
+** Issues
+   -- ( ) don't create new '2:2' if '2' already exists (Move_Active_Container_To_Workspace)
+   -- ( ) Create README
