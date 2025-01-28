@@ -97,6 +97,7 @@ pub fn main() !void {
                     if (is_in_active_group(workspace) and active_group.len == 0) {
                         active_group = group_name;
                     } else if (is_in_active_group(workspace)) {
+                        // TODO: gracefull handling
                         debug.assert(mem.eql(u8, group_name, active_group));
                     }
                 }
@@ -133,9 +134,10 @@ pub fn main() !void {
                 var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
                 var iterations: usize = 0;
 
-                // TODO: determine whether rename conflicts (resulting in need to retry) actually happen now that bugs are fixed
-                while (completed.count() < workspaces.len and iterations < 100) : (iterations += 1) {
-                    for (workspaces, 0..) |workspace, index| {
+                while (iterations < workspaces.len) : (iterations += 1) {
+                    var index: usize = if (workspaces.len > 0) workspaces.len - 1 else 0;
+                    while (index >= 0) {
+                        const workspace = workspaces[index];
                         if (completed.isSet(index)) continue;
 
                         const info = workspace.get_name_info();
@@ -185,9 +187,9 @@ pub fn main() !void {
                         I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND) catch {
                             success = false;
                         };
-                        if (success) {
-                            completed.set(index);
-                        }
+                        if (index > 0) {
+                            index -= 1;
+                        } else break;
                     }
                 }
             }
