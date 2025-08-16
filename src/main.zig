@@ -821,7 +821,18 @@ fn check_active_group_consistency(workspaces: []*const Workspace, _active_worksp
     }
 }
 
+/// Calculates the global (relative to other groups) index of the workspace number
+fn group_index_global(workspace_num: u32) u32 {
+    return @divTrunc(workspace_num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+}
+
+/// Calculates the local (relative to other workspaces in the same group) index of the workspace number
+fn group_index_local(workspace_num: u32) u32 {
+    return workspace_num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+}
+
 fn is_in_active_group(workspace: *const Workspace) bool {
+    // return group_global_index(workspace) == 0
     return workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR;
 }
 
