@@ -15,6 +15,8 @@ const build_mode = @import("builtin").mode;
 const SAFETY_CHECKS_ENABLE = build_mode == .Debug or build_mode == .ReleaseSafe;
 const DEBUG_ENABLE = build_mode == .Debug;
 
+const GROUP_NAME_DEFAULT: []const u8 = "<default>";
+
 const Cli_Command = enum {
     Switch_Active_Workspace_Group,
     Assign_Workspace_To_Group,
@@ -39,7 +41,7 @@ pub fn main() !void {
     const alloc = arena_alloc.allocator();
 
     var args_iter = try std.process.argsWithAllocator(alloc);
-    _ = args_iter.next();
+    debug.assert(args_iter.skip());
 
     const maybe_cmd: ?Cli_Command = if (args_iter.next()) |cmd_str|
         // TODO: suggest command in case of misspelling
@@ -51,40 +53,115 @@ pub fn main() !void {
         return error.Help_Not_Implemented;
     };
 
-    const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
-    const socket = try net.connectUnixSocket(socket_path);
+    const socket = try I3.connect(alloc);
     defer socket.close();
 
-    var state: State = undefined;
+    var state = try alloc.create(State);
     const i3_workspaces = try I3.get_workspaces(socket, alloc);
-    _ = i3_workspaces;
-    const workspace_count = try I3.load_workspaces(&state.workspace_store, socket, alloc);
-    state.workspaces = try alloc.alloc((*const I3.Workspace), workspace_count);
-    for (0..workspace_count) |i| {
-        state.workspaces[i] = &state.workspace_store[i];
-    }
-    state.focused = focused: for (state.workspaces) |workspace| {
-        if (workspace.*.focused) {
-            break :focused workspace;
+
+    state.groups = try .init(alloc, &.{}, &.{});
+    try state.groups.ensureTotalCapacity(alloc, i3_workspaces.len);
+    state.workspaces = try alloc.alloc((*const Workspace), i3_workspaces.len);
+
+    for (i3_workspaces, 0..) |i3_workspace, index| {
+        const workspace = &state.workspace_store[index];
+        Workspace.init_in_place_from_i3(workspace, i3_workspace);
+        const group_entry = state.groups.getOrPutAssumeCapacity(workspace.group_name);
+        if (group_entry.found_existing) {
+            workspace.group_name = group_entry.key_ptr.*;
         }
-    } else null;
+        state.workspaces[index] = workspace;
+        if (i3_workspace.focused) {
+            state.focused = workspace;
+        }
+    }
     // TODO: actually use
     if (false) {
-        const cmd_with_args = try fill_cmd_args(cmd, &state, &args_iter, alloc);
+        const cmd_with_args = try fill_cmd_args(cmd, state, &args_iter, alloc);
         _ = cmd_with_args;
     }
-    try do_cmd(&state, cmd, &args_iter, socket, alloc);
+    try do_cmd(state, cmd, &args_iter, socket, alloc);
 }
 
 const State = struct {
-    workspace_store: [WORKSPACE_COUNT_MAX]I3.Workspace,
-    workspaces: []*const I3.Workspace,
-    focused: ?*const I3.Workspace,
+    workspace_store: [WORKSPACE_COUNT_MAX]Workspace,
+    workspaces: []*const Workspace,
+    groups: GroupMap,
+    focused: ?*const Workspace,
+
+    const GroupMap = std.StringArrayHashMapUnmanaged(void);
 
     const WORKSPACE_COUNT_MAX: usize = 512;
 };
 
-const Workspace = struct {};
+const Workspace = struct {
+    id: u64,
+    i3_name: []const u8,
+    name: []const u8,
+    group_name: []const u8,
+    num: u32,
+    num_str: ?[]const u8,
+    output: []const u8,
+
+    fn init_in_place_from_i3(this: *Workspace, i3_workspace: I3.Workspace) void {
+        this.id = i3_workspace.id;
+        this.i3_name = i3_workspace.name;
+        this.num = i3_workspace.num;
+        this.output = i3_workspace.output;
+
+        const count_colons = blk: {
+            var count: u32 = 0;
+            for (i3_workspace.name) |c| {
+                count += @intFromBool(c == ':');
+            }
+            break :blk count;
+        };
+        switch (count_colons) {
+            0 => {
+                this.num_str = i3_workspace.name;
+                this.group_name = "<default>";
+                this.name = i3_workspace.name;
+            },
+            1 => {
+                const part = mem.lastIndexOfScalar(u8, i3_workspace.name, ':').?;
+                this.num_str = i3_workspace.name[0..part];
+                this.group_name = GROUP_NAME_DEFAULT;
+                this.name = i3_workspace.name[part + 1 ..];
+            },
+            else => {
+                const part_a = mem.indexOfScalar(u8, i3_workspace.name, ':').?;
+                const part_b = mem.indexOfScalarPos(u8, i3_workspace.name, part_a + 1, ':').?;
+                this.num_str = i3_workspace.name[0..part_a];
+                this.group_name = i3_workspace.name[part_a + 1 .. part_b];
+                this.name = i3_workspace.name[part_b + 1 ..];
+            },
+        }
+    }
+
+    pub fn sort_by_output_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
+        return mem.lessThan(u8, a.output, b.output);
+    }
+
+    pub fn sort_by_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
+        return mem.lessThan(u8, a.name, b.name);
+    }
+
+    pub fn sort_by_group_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
+        // TODO: consider caching group_names
+        return mem.lessThan(u8, a.get_group_name(), b.get_group_name());
+    }
+
+    // PERF: rewrite
+    pub fn sort_by_logical_num_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
+        const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+        const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+        if (a_logical != b_logical) {
+            return a_logical < b_logical;
+        }
+
+        return mem.lessThan(u8, a.name, b.name);
+    }
+};
 
 const Cli_Command_With_Arguments = struct {
     cmd: Cli_Command,
@@ -134,7 +211,8 @@ fn fill_cmd_args(cmd: Cli_Command, state: *const State, args_iter: *std.process.
 
     const workspaces = state.workspaces;
     if (get_group) get_group: {
-        const group_names = try extract_workspace_group_names(alloc, workspaces);
+        const group_names = try alloc.dupe([]const u8, state.groups.keys());
+        sort_alphabetically(group_names);
         if (args_iter.next()) |group_name| {
             result.group_name = group_name;
             result.is_new = blk: for (group_names) |existing_group_name| {
@@ -205,7 +283,8 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
     switch (cmd) {
         .Switch_Active_Workspace_Group => {
             const workspaces = state.workspaces;
-            const group_names = try extract_workspace_group_names(alloc, workspaces);
+            const group_names = try alloc.dupe([]const u8, state.groups.keys());
+            sort_alphabetically(group_names);
             // TODO: ensure default group is always shown?
             const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return;
             // TODO: if new_workspace_group_name already exists, don't rename all workspaces
@@ -237,7 +316,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                         logical_group_count = logical_group_index;
                     }
 
-                    const group_name = workspace.get_group_name();
+                    const group_name = workspace.group_name;
                     const group_name_index = group_name_index: for (group_names, 0..) |existing_group_name, index| {
                         if (mem.eql(u8, existing_group_name, group_name)) break :group_name_index index;
                     } else unreachable;
@@ -285,7 +364,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                 var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
                 var iterations: usize = 0;
 
-                mem.sort(*const I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
+                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
 
                 // TODO: determine if iterations + retries are still necessary with reverse
                 while (iterations < workspaces.len and completed.count() < workspaces.len) : (iterations += 1) {
@@ -295,7 +374,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                         const workspace = workspaces[index];
                         if (completed.isSet(index)) continue;
 
-                        const info = workspace.get_name_info();
+                        const info = workspace;
 
                         const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
                         const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
@@ -304,7 +383,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                         debug.print(
                             "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
                             .{
-                                workspace.name,
+                                workspace.i3_name,
                                 info.name,
                                 num_logical_orig,
                                 num_actual,
@@ -374,16 +453,11 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
         },
         .Assign_Workspace_To_Group => {
             const workspaces = state.workspaces;
-            const active_workspace = blk: {
-                for (workspaces) |workspace| {
-                    if (workspace.focused) {
-                        break :blk workspace;
-                    }
-                } else unreachable;
-            };
+            const active_workspace = state.focused orelse return error.NoFocusedWorkspace;
 
             const group_name = if (args_iter.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
-                const group_names = try extract_workspace_group_names(alloc, workspaces);
+                const group_names = try alloc.dupe([]const u8, state.groups.keys());
+                sort_alphabetically(group_names);
                 const choice = try Rofi.select_or_new(alloc, "Workspace Group", group_names) orelse return;
                 switch (choice) {
                     .new => |_| return error.TODO_Allow_New_Group,
@@ -403,19 +477,19 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             };
 
             const group_logical_num = blk: for (workspaces) |workspace| {
-                if (std.mem.eql(u8, workspace.get_group_name(), group_name)) {
+                if (mem.eql(u8, workspace.group_name, group_name)) {
                     break :blk @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
                 }
             } else unreachable;
 
-            const active_workspace_name_info = active_workspace.get_name_info();
+            const active_workspace_name_info = active_workspace;
 
             const active_workspace_actual_num = active_workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
 
             const workspace_with_num_exists = blk: for (workspaces) |workspace| {
                 const workspace_actual_num = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
                 const is_actual_num_same = workspace_actual_num == active_workspace_actual_num;
-                const is_group_name_same = std.mem.eql(u8, workspace.get_group_name(), group_name);
+                const is_group_name_same = std.mem.eql(u8, workspace.group_name, group_name);
                 if (is_actual_num_same and is_group_name_same) {
                     break :blk true;
                 }
@@ -453,30 +527,23 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
 
             const name = if (args_iter.next()) |arg| arg else blk: {
-                mem.sort(*const I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
-                var names = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
                 var group_name_len_max: u64 = 0;
                 var name_len_max: u64 = 0;
 
                 for (workspaces) |workspace| {
-                    const pair = I3.Workspace.get_name_info(workspace);
-                    if (pair.group_name.len > group_name_len_max) {
-                        group_name_len_max = pair.group_name.len;
-                    }
-                    if (pair.name.len > name_len_max) {
-                        name_len_max = pair.name.len;
-                    }
-                    names.appendAssumeCapacity(pair);
+                    group_name_len_max = @max(group_name_len_max, workspace.group_name.len);
+                    name_len_max = @max(name_len_max, workspace.name.len);
                 }
 
                 var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
 
-                for (names.items) |pair| {
-                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
-                    try selection.writer.writeAll(pair.group_name);
-                    try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
-                    try selection.writer.writeAll(pair.name);
+                for (workspaces) |workspace| {
+                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| workspace.group_name.len);
+                    try selection.writer.writeAll(workspace.group_name);
+                    try selection.writer.writeByteNTimes(' ', name_len_max -| workspace.name.len + 2);
+                    try selection.writer.writeAll(workspace.name);
                     try selection.writer.writeByte('\n');
                 }
                 const maybe_choice = try selection.finish();
@@ -535,8 +602,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                     // otherwise look for a workspace named $name and if we find it return it so we get the workspace number correct
                     for (workspaces) |workspace| {
                         const is_in_active_workspace_group = is_in_active_group(workspace);
-                        const name_info = workspace.get_name_info();
-                        if (is_in_active_workspace_group and mem.eql(u8, name_info.name, name)) {
+                        if (is_in_active_workspace_group and mem.eql(u8, workspace.name, name)) {
                             break :blk workspace.name;
                         }
                     }
@@ -559,26 +625,28 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             const workspaces = state.workspaces;
 
             const workspace_user_name = if (args_iter.next()) |arg| arg else blk: {
-                var active_group_workspaces = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+                var active_group_workspaces = std.ArrayListUnmanaged(*const Workspace).fromOwnedSlice(try alloc.dupe(*const Workspace, state.workspaces));
                 var group_name_len_max: u64 = 0;
-                for (workspaces) |workspace| {
+                var i: u32 = 0;
+                while (i < active_group_workspaces.items.len) {
+                    const workspace = active_group_workspaces.items[i];
                     if (is_in_active_group(workspace)) {
-                        const name_info = workspace.get_name_info();
-                        active_group_workspaces.appendAssumeCapacity(name_info);
-                        if (name_info.group_name.len > group_name_len_max) {
-                            group_name_len_max = name_info.group_name.len;
-                        }
+                        group_name_len_max = @max(workspace.group_name.len, group_name_len_max);
+                        i += 1;
+                    } else {
+                        _ = active_group_workspaces.swapRemove(i);
                     }
                 }
+                mem.sort(*const Workspace, active_group_workspaces.items, {}, Workspace.sort_by_name_less_than);
 
                 var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
 
-                for (active_group_workspaces.items) |name_info| {
-                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| name_info.group_name.len);
-                    try selection.writer.writeAll(name_info.group_name);
+                for (active_group_workspaces.items) |workspace| {
+                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| workspace.group_name.len);
+                    try selection.writer.writeAll(workspace.group_name);
                     try selection.writer.writeByte(':');
-                    try selection.writer.writeAll(name_info.name);
+                    try selection.writer.writeAll(workspace.name);
                     try selection.writer.writeByte('\n');
                 }
                 const choice = try selection.finish() orelse return;
@@ -592,7 +660,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             var workspace_group_name = active_workspace_group orelse "<default>";
             var workspace_logical_group_index: u32 = 0;
             var workspace_num = blk: for (workspaces) |workspace| {
-                if (workspace.focused) {
+                if (workspace == state.focused) {
                     break :blk workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
                 }
             } else 1;
@@ -601,7 +669,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
                 workspace_name = workspace_user_name[colon_pos + 1 ..];
                 workspace_group_name = workspace_user_name[0..colon_pos];
                 const is_new_group = blk: for (workspaces) |workspace| {
-                    if (mem.eql(u8, workspace_group_name, workspace.get_group_name())) {
+                    if (mem.eql(u8, workspace_group_name, workspace.group_name)) {
                         break :blk false;
                     }
                 } else true;
@@ -623,8 +691,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             }
 
             for (workspaces) |workspace| {
-                const name_info = workspace.get_name_info();
-                if (mem.eql(u8, name_info.group_name, workspace_group_name)) {
+                if (mem.eql(u8, workspace.group_name, workspace_group_name)) {
                     workspace_logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
                     break;
                 }
@@ -661,8 +728,8 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
     if (state.workspaces.len == 0) {
         return;
     }
-    const workspaces = try alloc.dupe((*const I3.Workspace), state.workspaces);
-    mem.sort(*const I3.Workspace, workspaces, {}, I3.Workspace.sort_by_output_less_than);
+    const workspaces = try alloc.dupe((*const Workspace), state.workspaces);
+    mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_output_less_than);
     var ouput_start_index: u32 = 0;
     var output_end_index: u32 = 1;
     var found_multiple_outputs = false;
@@ -670,12 +737,12 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
         const output_a = workspaces[output_end_index - 1].output;
         const output_b = workspaces[output_end_index].output;
         if (!mem.eql(u8, output_a, output_b)) {
-            mem.sort(*const I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+            mem.sort(*const Workspace, workspaces[ouput_start_index..output_end_index], {}, Workspace.sort_by_name_less_than);
             ouput_start_index = output_end_index;
             found_multiple_outputs = true;
         }
     }
-    mem.sort(*const I3.Workspace, workspaces[ouput_start_index..output_end_index], {}, I3.Workspace.sort_by_name_less_than);
+    mem.sort(*const Workspace, workspaces[ouput_start_index..output_end_index], {}, Workspace.sort_by_name_less_than);
 
     var output = workspaces[0].output;
     const prefix = if (found_multiple_outputs) blk: {
@@ -688,7 +755,7 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
             output = workspace.output;
         }
         debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
-        debug.print("{s}  group: {s}\n", .{ prefix, workspace.get_group_name() });
+        debug.print("{s}  group: {s}\n", .{ prefix, workspace.group_name });
         debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
         debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
@@ -716,40 +783,21 @@ fn workspace_name_parts_len(num: u32, group_name: []const u8, name: []const u8) 
     return @intCast(len);
 }
 
-fn extract_workspace_group_names(alloc: Allocator, workspaces: []*const I3.Workspace) ![][]const u8 {
-    var names = try ArrayList([]const u8).initCapacity(alloc, workspaces.len);
-    for (workspaces) |workspace| {
-        const group_name = workspace.get_group_name();
-        names.appendAssumeCapacity(group_name);
-    }
-    {
-        mem.sort(
-            []const u8,
-            names.items,
-            {},
-            struct {
-                fn less_than(_: void, a: []const u8, b: []const u8) bool {
-                    return mem.lessThan(u8, a, b);
-                }
-            }.less_than,
-        );
-        var i: u32 = 1;
-        while (i < names.items.len) {
-            if (mem.eql(u8, names.items[i - 1], names.items[i])) {
-                _ = names.orderedRemove(i);
-            } else {
-                i += 1;
-            }
+fn sort_alphabetically(strings: [][]const u8) void {
+    const cmp = struct {
+        fn less_than(_: void, a: []const u8, b: []const u8) bool {
+            return mem.lessThan(u8, a, b);
         }
-    }
-    return names.items;
+    };
+
+    mem.sort([]const u8, strings, {}, cmp.less_than);
 }
 
-fn get_active_workspace_group(workspaces: []*const I3.Workspace) ?[]const u8 {
+fn get_active_workspace_group(workspaces: []*const Workspace) ?[]const u8 {
     var active_workspace_group: ?[]const u8 = null;
     for (workspaces) |workspace| {
         if (is_in_active_group(workspace)) {
-            active_workspace_group = workspace.get_group_name();
+            active_workspace_group = workspace.group_name;
             break;
         }
     }
@@ -760,20 +808,20 @@ fn get_active_workspace_group(workspaces: []*const I3.Workspace) ?[]const u8 {
     return active_workspace_group;
 }
 
-fn check_active_group_consistency(workspaces: []*const I3.Workspace, _active_workspace_group: ?[]const u8) void {
+fn check_active_group_consistency(workspaces: []*const Workspace, _active_workspace_group: ?[]const u8) void {
     var active_workspace_group = _active_workspace_group;
     for (workspaces) |workspace| {
         if (is_in_active_group(workspace)) {
             if (active_workspace_group) |group| {
-                debug.assert(mem.eql(u8, workspace.get_group_name(), group));
+                debug.assert(mem.eql(u8, workspace.group_name, group));
             } else {
-                active_workspace_group = workspace.get_group_name();
+                active_workspace_group = workspace.group_name;
             }
         }
     }
 }
 
-fn is_in_active_group(workspace: *const I3.Workspace) bool {
+fn is_in_active_group(workspace: *const Workspace) bool {
     return workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR;
 }
 

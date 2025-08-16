@@ -4,6 +4,12 @@ const mem = std.mem;
 const debug = std.debug;
 const Allocator = mem.Allocator;
 
+pub fn connect(alloc: Allocator) !net.Stream {
+    const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
+    const socket = try net.connectUnixSocket(socket_path);
+    return socket;
+}
+
 const Version = struct {
     major: u32,
     minor: u32,
@@ -33,33 +39,6 @@ pub const Workspace = struct {
     num: u32,
     urgent: bool,
     focused: bool,
-
-    pub fn sort_by_output_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        return mem.lessThan(u8, a.output, b.output);
-    }
-
-    pub fn sort_by_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        return mem.lessThan(u8, a.name, b.name);
-    }
-
-    pub fn sort_by_group_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        // TODO: consider caching group_names
-        return mem.lessThan(u8, a.get_group_name(), b.get_group_name());
-    }
-
-    // PERF: rewrite
-    pub fn sort_by_logical_num_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        const a_logical = @divTrunc(a.num, @import("main.zig").INACTIVE_WORKSPACE_GROUP_FACTOR);
-        const b_logical = @divTrunc(b.num, @import("main.zig").INACTIVE_WORKSPACE_GROUP_FACTOR);
-        if (a_logical != b_logical) {
-            return a_logical < b_logical;
-        }
-
-        const a_name_info = a.get_name_info();
-        const b_name_info = b.get_name_info();
-
-        return mem.lessThan(u8, a_name_info.name, b_name_info.name);
-    }
 
     const NameInfo = struct {
         num: ?[]const u8,
@@ -184,20 +163,20 @@ const Reply = enum(i32) {
 
 const MAGIC_STRING = "i3-ipc";
 
-fn exec_command(socket: net.Stream, command: Command, msg: []const u8) !void {
+pub fn exec_command(socket: net.Stream, command: Command, msg: []const u8) !void {
     try socket.writeAll(MAGIC_STRING);
     try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg.len))));
     try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
     try socket.writeAll(msg);
 }
 
-fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !void {
+pub fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !void {
     try socket.writeAll(MAGIC_STRING);
     try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg_len))));
     try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
 }
 
-fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
+pub fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
     // PERF: make initial buf with [I3_MAGIC_STRING.len + 4 + 4]u8 to cut number of read calls
     {
         var magic_buffer: [MAGIC_STRING.len]u8 = undefined;
@@ -240,7 +219,7 @@ fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !
     return message_buffer;
 }
 
-fn read_reply_expect_single_success_true(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !void {
+pub fn read_reply_expect_single_success_true(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !void {
     const expected_response = "[{\"success\":true}]";
     const expected_response_2 = "[{\"success\": true}]";
     var buf_alloc = std.heap.stackFallback(expected_response_2.len + 1, alloc);
