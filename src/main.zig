@@ -46,9 +46,13 @@ pub fn main() !void {
     const socket = try net.connectUnixSocket(socket_path);
     defer socket.close();
 
-    const cmd: ?Cli_Command = if (args_iter.next()) |cmd_str| Cli_Command.Map.get(cmd_str) else null;
+    const cmd: Cli_Command = (if (args_iter.next()) |cmd_str| Cli_Command.Map.get(cmd_str) else null) orelse .Help;
     // TODO: suggest command in case of misspelling
-    switch (cmd orelse .Help) {
+    try do_cmd(cmd, &args_iter, socket, alloc);
+}
+
+fn do_cmd(cmd: Cli_Command, args_iter: *std.process.ArgIterator, socket: net.Stream, alloc: Allocator) !void {
+    switch (cmd) {
         .Help => {
             return error.NotImplemented;
         },
