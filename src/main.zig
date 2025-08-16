@@ -47,8 +47,127 @@ pub fn main() !void {
     defer socket.close();
 
     const cmd: Cli_Command = (if (args_iter.next()) |cmd_str| Cli_Command.Map.get(cmd_str) else null) orelse .Help;
+    if (false) {
+        const cmd_with_args = try fill_cmd_args(cmd, &args_iter, socket, alloc);
+        _ = cmd_with_args;
+    }
     // TODO: suggest command in case of misspelling
     try do_cmd(cmd, &args_iter, socket, alloc);
+}
+
+const Cli_Command_With_Arguments = struct {
+    cmd: Cli_Command,
+    workspace_name: []const u8,
+    group_name: []const u8,
+    is_new: bool,
+
+    fn zero(cmd: Cli_Command) @This() {
+        return .{
+            .cmd = cmd,
+            .workspace_name = "",
+            .group_name = "",
+            .is_new = false,
+        };
+    }
+};
+
+// TODO: rename alloc -> arena
+fn fill_cmd_args(cmd: Cli_Command, args_iter: *std.process.ArgIterator, socket: net.Stream, alloc: Allocator) !Cli_Command_With_Arguments {
+    var get_group = false;
+    var get_workspace = false;
+    var rofi_label: []const u8 = "";
+    var result: Cli_Command_With_Arguments = .zero(cmd);
+
+    switch (cmd) {
+        .Help, .Pretty_List_Workspaces => {
+            return result;
+        },
+        .Switch_Active_Workspace_Group => {
+            get_group = true;
+            rofi_label = "Switch Active Workspace Group";
+        },
+        .Assign_Workspace_To_Group => {
+            get_group = true;
+            rofi_label = "Workspace Group";
+        },
+        .Rename_Workspace => {
+            get_workspace = true;
+        },
+        .Focus_Workspace => {
+            get_workspace = true;
+        },
+        .Move_Active_Container_To_Workspace => {
+            get_workspace = true;
+        },
+    }
+
+    const workspaces = try I3.get_workspaces(socket, alloc);
+    if (get_group) get_group: {
+        const group_names = try extract_workspace_group_names(alloc, workspaces);
+        if (args_iter.next()) |group_name| {
+            result.group_name = group_name;
+            result.is_new = blk: for (group_names) |existing_group_name| {
+                if (mem.eql(u8, group_name, existing_group_name)) {
+                    break :blk false;
+                }
+            } else true;
+            break :get_group;
+        }
+        // TODO: ensure default group is always shown?
+        const choice = try Rofi.select_or_new(alloc, rofi_label, group_names) orelse return error.Aborted;
+        // TODO: if new_workspace_group_name already exists, don't rename all workspaces
+        // TODO: allow entering `group_name:workspace_name` to create new workspace with non number workspace name
+
+        // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
+        result.group_name = switch (choice) {
+            .new => |name| name,
+            .existing => |index| group_names[index],
+        };
+        result.is_new = choice == .new;
+    }
+
+    if (get_workspace) get_workspace: {
+        if (args_iter.next()) |workspace_name| {
+            result.workspace_name = workspace_name;
+            break :get_workspace;
+        }
+        mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
+        var names = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
+        var group_name_len_max: u64 = 0;
+        var name_len_max: u64 = 0;
+
+        for (workspaces) |workspace| {
+            const pair = I3.Workspace.get_name_info(workspace);
+            if (pair.group_name.len > group_name_len_max) {
+                group_name_len_max = pair.group_name.len;
+            }
+            if (pair.name.len > name_len_max) {
+                name_len_max = pair.name.len;
+            }
+            names.appendAssumeCapacity(pair);
+        }
+
+        var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
+        // TODO: Pango markup help text here
+
+        for (names.items) |pair| {
+            try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
+            try selection.writer.writeAll(pair.group_name);
+            try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
+            try selection.writer.writeAll(pair.name);
+            try selection.writer.writeByte('\n');
+        }
+        const choice = (try selection.finish()) orelse return error.Aborted;
+        var choice_iter = mem.tokenizeScalar(u8, choice, ' ');
+        _ = choice_iter.next();
+        const name = choice_iter.rest();
+        if (name.len == 0) {
+            return error.InvalidChoice;
+        }
+        result.workspace_name = name;
+    }
+
+    return result;
 }
 
 fn do_cmd(cmd: Cli_Command, args_iter: *std.process.ArgIterator, socket: net.Stream, alloc: Allocator) !void {
