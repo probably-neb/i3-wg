@@ -23,6 +23,7 @@
    --- ( ) for group based commands - do group manipulation then switch to group (possibly try to switch to container in group)
    -- ( ) save group command? (get + parse tree -> save to sqlite or something)
    -- ( ) delete workspace group
+   -- ( ) Move workspace within focused group not active group
 ** Issues
    -- ( ) don't create new '2:2' if '2' already exists (Move_Active_Container_To_Workspace)
    -- ( ) Create README
