@@ -5,6 +5,9 @@ const debug = std.debug;
 const ArrayList = std.ArrayList;
 const Allocator = mem.Allocator;
 
+const I3 = @import("i3.zig");
+const Rofi = @import("rofi.zig");
+
 const INACTIVE_WORKSPACE_GROUP_FACTOR = 10_000;
 
 const build_mode = @import("builtin").mode;
@@ -53,14 +56,16 @@ pub fn main() !void {
     defer socket.close();
 
     var state: State = undefined;
-    const workspace_count = try I3.load_workspaces_into_buf(&state.workspace_store, socket, alloc);
+    const i3_workspaces = try I3.get_workspaces(socket, alloc);
+    _ = i3_workspaces;
+    const workspace_count = try I3.load_workspaces(&state.workspace_store, socket, alloc);
     state.workspaces = try alloc.alloc((*const I3.Workspace), workspace_count);
     for (0..workspace_count) |i| {
         state.workspaces[i] = &state.workspace_store[i];
     }
-    state.active = active: for (state.workspaces) |workspace| {
+    state.focused = focused: for (state.workspaces) |workspace| {
         if (workspace.*.focused) {
-            break :active workspace;
+            break :focused workspace;
         }
     } else null;
     // TODO: actually use
@@ -74,10 +79,12 @@ pub fn main() !void {
 const State = struct {
     workspace_store: [WORKSPACE_COUNT_MAX]I3.Workspace,
     workspaces: []*const I3.Workspace,
-    active: ?*const I3.Workspace,
+    focused: ?*const I3.Workspace,
 
     const WORKSPACE_COUNT_MAX: usize = 512;
 };
+
+const Workspace = struct {};
 
 const Cli_Command_With_Arguments = struct {
     cmd: Cli_Command,
@@ -777,371 +784,6 @@ fn parse_workspace_name_num(workspace_name: []const u8) ?u32 {
     }
     return std.fmt.parseInt(u32, name, 10) catch null;
 }
-
-const I3 = struct {
-    const Version = struct {
-        major: u32,
-        minor: u32,
-        patch: u32,
-    };
-
-    fn get_version(socket: net.Stream, alloc: Allocator) !Version {
-        try exec_command(socket, .GET_VERSION, "");
-        const response_full = try read_reply(socket, alloc, .VERSION);
-        const version = try std.json.parseFromSlice(Version, alloc, response_full, .{
-            .ignore_unknown_fields = true,
-        });
-        defer version.deinit();
-        return version.value;
-    }
-
-    const Workspace = struct {
-        id: u64,
-        name: []const u8,
-        rect: struct {
-            x: u32,
-            y: u32,
-            width: u32,
-            height: u32,
-        },
-        output: []const u8,
-        num: u32,
-        urgent: bool,
-        focused: bool,
-
-        pub fn sort_by_output_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-            return mem.lessThan(u8, a.output, b.output);
-        }
-
-        pub fn sort_by_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-            return mem.lessThan(u8, a.name, b.name);
-        }
-
-        pub fn sort_by_group_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-            // TODO: consider caching group_names
-            return mem.lessThan(u8, a.get_group_name(), b.get_group_name());
-        }
-
-        // PERF: rewrite
-        pub fn sort_by_logical_num_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-            const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-            const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-            if (a_logical != b_logical) {
-                return a_logical < b_logical;
-            }
-
-            const a_name_info = a.get_name_info();
-            const b_name_info = b.get_name_info();
-
-            return mem.lessThan(u8, a_name_info.name, b_name_info.name);
-        }
-
-        const NameInfo = struct {
-            num: ?[]const u8,
-            group_name: []const u8,
-            name: []const u8,
-        };
-
-        pub fn get_name_info(self: *const Workspace) NameInfo {
-            const count_colons = blk: {
-                var count: u32 = 0;
-                for (self.name) |c| {
-                    count += @intFromBool(c == ':');
-                }
-                break :blk count;
-            };
-            switch (count_colons) {
-                0 => return .{ .num = self.name, .group_name = "<default>", .name = self.name },
-                1 => {
-                    const part = mem.lastIndexOfScalar(u8, self.name, ':').?;
-                    return .{ .num = self.name[0..part], .group_name = "<default>", .name = self.name[part + 1 ..] };
-                },
-                else => {
-                    const part_a = mem.indexOfScalar(u8, self.name, ':').?;
-                    const part_b = mem.indexOfScalarPos(u8, self.name, part_a + 1, ':').?;
-                    return .{
-                        .num = self.name[0..part_a],
-                        .group_name = self.name[part_a + 1 .. part_b],
-                        .name = self.name[part_b + 1 ..],
-                    };
-                },
-            }
-        }
-
-        pub fn get_group_name(self: Workspace) []const u8 {
-            var section_iter = mem.tokenizeScalar(u8, self.name, ':');
-            _ = section_iter.next();
-            var group_name = section_iter.next() orelse "<default>";
-            if (section_iter.next() == null) {
-                // set group name to default if only 2 sections
-                group_name = "<default>";
-            }
-            return group_name;
-        }
-
-        pub fn format(self: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.writeAll("Workspace{ ");
-            const fields = .{ "id", "name", "rect", "output", "num", "urgent", "focused" };
-            inline for (fields, 0..) |field, index| {
-                if (@TypeOf(@field(self, field)) == []const u8) {
-                    try writer.print("{s}: \"{s}\"", .{ field, @field(self, field) });
-                } else {
-                    try writer.print("{s}: {any}", .{ field, @field(self, field) });
-                }
-                if (index < fields.len - 1) {
-                    try writer.writeAll(", ");
-                }
-            }
-            try writer.writeAll(" }");
-        }
-    };
-
-    fn get_workspaces(socket: net.Stream, alloc: Allocator) ![]Workspace {
-        try exec_command(socket, .GET_WORKSPACES, "");
-        const response_full = try read_reply(socket, alloc, .WORKSPACES);
-        const response = try std.json.parseFromSlice([]Workspace, alloc, response_full, .{
-            .ignore_unknown_fields = true,
-        });
-        // debug.print("{s}\n", .{response_full});
-        return response.value;
-    }
-
-    fn load_workspaces_into_buf(buf: []Workspace, socket: net.Stream, arena: Allocator) !usize {
-        // TODO: consider creating scratch arena here for response and parsed result, and freeing to keep max mem usage down
-        try exec_command(socket, .GET_WORKSPACES, "");
-        const response_full = try read_reply(socket, arena, .WORKSPACES);
-        const response = try std.json.parseFromSliceLeaky([]Workspace, arena, response_full, .{
-            .ignore_unknown_fields = true,
-        });
-
-        if (response.len > buf.len) {
-            return error.Not_Enough_Space;
-        }
-        @memcpy(buf[0..response.len], response);
-        return response.len;
-    }
-
-    fn rename_workspace(socket: net.Stream, alloc: Allocator, name: []const u8, to_name: []const u8) !void {
-        const command = try std.fmt.allocPrint(alloc, "rename workspace {s} to {s}", .{ name, to_name });
-        try exec_command(socket, .RUN_COMMAND, command);
-        alloc.free(command);
-        const response = try read_reply(socket, alloc, .COMMAND);
-        alloc.free(response);
-
-        debug.print("{s}\n", .{response});
-    }
-
-    fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
-        const command = "workspace ";
-        try exec_command_len(socket, .RUN_COMMAND, @intCast(command.len + name.len));
-        try socket.writeAll(command);
-        try socket.writeAll(name);
-        try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
-        return;
-    }
-
-    const Command = enum(i32) {
-        RUN_COMMAND = 0,
-        GET_WORKSPACES = 1,
-        SUBSCRIBE = 2,
-        GET_OUTPUTS = 3,
-        GET_TREE = 4,
-        GET_MARKS = 5,
-        GET_BAR_CONFIG = 6,
-        GET_VERSION = 7,
-        GET_BINDING_MODES = 8,
-        GET_CONFIG = 9,
-        SEND_TICK = 10,
-        SYNC = 11,
-        GET_BINDING_STATE = 12,
-    };
-
-    const Reply = enum(i32) {
-        COMMAND = 0,
-        WORKSPACES = 1,
-        SUBSCRIBE = 2,
-        OUTPUTS = 3,
-        TREE = 4,
-        MARKS = 5,
-        BAR_CONFIG = 6,
-        VERSION = 7,
-        BINDING_MODES = 8,
-        GET_CONFIG = 9,
-        TICK = 10,
-        SYNC = 11,
-        GET_BINDING_STATE = 12,
-    };
-
-    const MAGIC_STRING = "i3-ipc";
-
-    fn exec_command(socket: net.Stream, command: Command, msg: []const u8) !void {
-        try socket.writeAll(MAGIC_STRING);
-        try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg.len))));
-        try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
-        try socket.writeAll(msg);
-    }
-
-    fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !void {
-        try socket.writeAll(MAGIC_STRING);
-        try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg_len))));
-        try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
-    }
-
-    fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
-        // PERF: make initial buf with [I3_MAGIC_STRING.len + 4 + 4]u8 to cut number of read calls
-        {
-            var magic_buffer: [MAGIC_STRING.len]u8 = undefined;
-            const magic_read_count = try socket.readAtLeast(&magic_buffer, MAGIC_STRING.len);
-            if (magic_read_count != MAGIC_STRING.len or !mem.eql(u8, MAGIC_STRING, &magic_buffer)) {
-                return error.InvalidMagic;
-            }
-        }
-
-        const message_length = blk: {
-            var length_buffer: [4]u8 = undefined;
-            const length_read_count = try socket.readAtLeast(&length_buffer, 4);
-            if (length_read_count != 4) {
-                return error.InvalidLength;
-            }
-            const message_len_i32 = @as(i32, @bitCast(length_buffer));
-            if (message_len_i32 < 0) {
-                return error.InvalidLength;
-            }
-            break :blk @as(usize, @intCast(message_len_i32));
-        };
-
-        {
-            var type_buffer: [4]u8 = undefined;
-            const type_read_count = try socket.readAtLeast(&type_buffer, 4);
-            if (type_read_count != 4) {
-                return error.InvalidType;
-            }
-            const type_val = @as(i32, @bitCast(type_buffer));
-            const reply: Reply = @enumFromInt(type_val);
-            if (reply != expected_reply) {
-                return error.UnexpectedReplyType;
-            }
-        }
-        const message_buffer = try alloc.alloc(u8, message_length);
-        const msg_read_count = try socket.readAtLeast(message_buffer, message_length);
-        if (msg_read_count != message_length) {
-            return error.InsufficientMessageLength;
-        }
-        return message_buffer;
-    }
-
-    fn read_reply_expect_single_success_true(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !void {
-        const expected_response = "[{\"success\":true}]";
-        const expected_response_2 = "[{\"success\": true}]";
-        var buf_alloc = std.heap.stackFallback(expected_response_2.len + 1, alloc);
-        const response = try read_reply(socket, buf_alloc.get(), expected_reply);
-        const equals_expected_response = if (response.len >= expected_response_2.len) mem.eql(u8, response[0..expected_response_2.len], expected_response_2) else mem.eql(u8, response[0..expected_response.len], expected_response);
-        if (!equals_expected_response) {
-            // TODO: parse out error message using original alloc and log / return it
-            // can use stack fallback allocator instead of FixedBufferAllocator to get full message if longer than expected (i.e. has error) or create new buf & memcpy buf contents into it
-            debug.print("unexpected response: '{s}'\n", .{response});
-            return error.UnsuccessfulResponse;
-        }
-        return;
-    }
-};
-
-const Rofi = struct {
-    pub fn select(alloc: Allocator, label: []const u8, items: [][]const u8) !?u32 {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-no-custom", "-p", label };
-        var child = std.process.Child.init(&args, alloc);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        try child.spawn();
-        for (items) |item| {
-            try child.stdin.?.writeAll(item);
-            try child.stdin.?.writeAll("\n");
-        }
-        // child.stdin.?.close();
-        const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
-        const result = mem.trim(u8, result_full, &std.ascii.whitespace);
-
-        _ = try child.wait();
-
-        if (result.len == 0) {
-            return null;
-        }
-
-        for (items, 0..) |item, index| {
-            if (mem.eql(u8, result, item)) {
-                return @intCast(index);
-            }
-        }
-
-        return null;
-    }
-
-    const SelectWriterIntermediate = struct {
-        child: std.process.Child,
-        writer: std.fs.File.Writer,
-        alloc: mem.Allocator,
-
-        pub fn finish(self: *SelectWriterIntermediate) !?[]const u8 {
-            const result_full = try self.child.stdout.?.readToEndAlloc(self.alloc, std.math.maxInt(usize));
-            const result = mem.trim(u8, result_full, &std.ascii.whitespace);
-
-            _ = try self.child.wait();
-
-            if (result.len == 0) {
-                return null;
-            }
-
-            return result;
-        }
-    };
-
-    pub fn select_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-no-custom", "-p", label };
-        var child = std.process.Child.init(&args, alloc);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        try child.spawn();
-        return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
-    }
-
-    pub fn select_or_new_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
-        var child = std.process.Child.init(&args, alloc);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        try child.spawn();
-        return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
-    }
-
-    pub fn select_or_new(alloc: Allocator, label: []const u8, items: [][]const u8) !?union(enum) { existing: u32, new: []const u8 } {
-        const args = [_][]const u8{ "rofi", "-dmenu", "-p", label };
-        var child = std.process.Child.init(&args, alloc);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        try child.spawn();
-        for (items) |item| {
-            try child.stdin.?.writeAll(item);
-            try child.stdin.?.writeAll("\n");
-        }
-        // child.stdin.?.close();
-        const result_full = try child.stdout.?.readToEndAlloc(alloc, std.math.maxInt(usize));
-        const result = mem.trim(u8, result_full, &std.ascii.whitespace);
-
-        _ = try child.wait();
-
-        if (result.len == 0) {
-            return null;
-        }
-
-        for (items, 0..) |item, index| {
-            if (mem.eql(u8, result, item)) {
-                return .{ .existing = @intCast(index) };
-            }
-        }
-        return .{ .new = result };
-    }
-};
-
 fn split_N_times(comptime T: type, buf: []const T, needle: T, comptime N: comptime_int) [N][]const T {
     var elems: [N][]const T = undefined;
     var iter = mem.tokenizeScalar(T, buf, needle);
