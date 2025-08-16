@@ -12,7 +12,7 @@ const build_mode = @import("builtin").mode;
 const SAFETY_CHECKS_ENABLE = build_mode == .Debug or build_mode == .ReleaseSafe;
 const DEBUG_ENABLE = build_mode == .Debug;
 
-const Cli_Commands = enum {
+const Cli_Command = enum {
     Help,
     Switch_Active_Workspace_Group,
     Assign_Workspace_To_Group,
@@ -46,9 +46,9 @@ pub fn main() !void {
     const socket = try net.connectUnixSocket(socket_path);
     defer socket.close();
 
-    const cmd = if (args_iter.next()) |cmd_str| Cli_Commands.Map.get(cmd_str) orelse Cli_Commands.Help else Cli_Commands.Help;
+    const cmd: ?Cli_Command = if (args_iter.next()) |cmd_str| Cli_Command.Map.get(cmd_str) else null;
     // TODO: suggest command in case of misspelling
-    switch (cmd) {
+    switch (cmd orelse .Help) {
         .Help => {
             return error.NotImplemented;
         },
@@ -134,9 +134,13 @@ pub fn main() !void {
                 var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
                 var iterations: usize = 0;
 
-                while (iterations < workspaces.len) : (iterations += 1) {
-                    var index: usize = if (workspaces.len > 0) workspaces.len - 1 else 0;
-                    while (index >= 0) {
+                mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
+
+                // TODO: determine if iterations + retries are still necessary with reverse
+                while (iterations < workspaces.len and completed.count() < workspaces.len) : (iterations += 1) {
+                    var idx: usize = workspaces.len;
+                    while (idx > 0) : (idx -= 1) {
+                        const index = idx - 1;
                         const workspace = workspaces[index];
                         if (completed.isSet(index)) continue;
 
@@ -161,6 +165,7 @@ pub fn main() !void {
                         const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
 
                         const is_group_default = mem.eql(u8, info.group_name, "<default>");
+                        // TODO: check if workspace rename is even necessary
 
                         const command_len =
                             "rename workspace ".len +
@@ -187,9 +192,9 @@ pub fn main() !void {
                         I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND) catch {
                             success = false;
                         };
-                        if (index > 0) {
-                            index -= 1;
-                        } else break;
+                        if (success) {
+                            completed.set(index);
+                        }
                     }
                 }
             }
@@ -480,10 +485,10 @@ pub fn main() !void {
             const command_len =
                 "move container to workspace ".len +
                 workspace_name_parts_len(
-                workspace_num,
-                workspace_group_name,
-                workspace_name,
-            );
+                    workspace_num,
+                    workspace_group_name,
+                    workspace_name,
+                );
             try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
             var writer = socket.writer();
             try writer.writeAll("move container to workspace ");
