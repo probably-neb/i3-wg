@@ -27,7 +27,7 @@ fn get_version(socket: net.Stream, alloc: Allocator) !Version {
 }
 
 pub const Workspace = struct {
-    id: u64,
+    id: i64,
     name: []const u8,
     rect: struct {
         x: u32,
@@ -67,23 +67,19 @@ pub fn get_workspaces(socket: net.Stream, alloc: Allocator) ![]Workspace {
     return response.value;
 }
 
-fn rename_workspace(socket: net.Stream, alloc: Allocator, name: []const u8, to_name: []const u8) !void {
-    const command = try std.fmt.allocPrint(alloc, "rename workspace {s} to {s}", .{ name, to_name });
-    try exec_command(socket, .RUN_COMMAND, command);
-    alloc.free(command);
-    const response = try read_reply(socket, alloc, .COMMAND);
-    alloc.free(response);
-
-    debug.print("{s}\n", .{response});
+pub fn rename_workspace(socket: net.Stream, alloc: Allocator, name: []const u8, to_name: []const u8) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "rename workspace {s} to {s}", .{ name, to_name });
+    try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 }
 
-fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
-    const command = "workspace ";
-    try exec_command_len(socket, .RUN_COMMAND, @intCast(command.len + name.len));
-    try socket.writeAll(command);
-    try socket.writeAll(name);
+pub fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "workspace {s}", .{name});
     try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
-    return;
+}
+
+pub fn move_active_container_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "move container to workspace {s}", .{name});
+    try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 }
 
 const Command = enum(i32) {
@@ -131,6 +127,11 @@ pub fn exec_command_len(socket: net.Stream, command: Command, msg_len: u32) !voi
     try socket.writeAll(MAGIC_STRING);
     try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg_len))));
     try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
+}
+
+pub fn exec_command_print(socket: net.Stream, command: Command, comptime msg: []const u8, args: anytype) !void {
+    try exec_command_len(socket, command, @intCast(std.fmt.count(msg, args)));
+    try socket.writer().print(msg, args);
 }
 
 pub fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {

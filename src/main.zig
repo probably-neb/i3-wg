@@ -48,12 +48,14 @@ pub fn main() !void {
     const socket = try I3.connect(alloc);
     defer socket.close();
 
-    var state = try alloc.create(State);
     const i3_workspaces = try I3.get_workspaces(socket, alloc);
 
+    var state = try alloc.create(State);
+    state.* = .zero;
     state.groups = try .init(alloc, &.{}, &.{});
     try state.groups.ensureTotalCapacity(alloc, i3_workspaces.len);
     state.workspaces = try alloc.alloc((*const Workspace), i3_workspaces.len);
+    state.workspace_count = @intCast(i3_workspaces.len);
 
     for (i3_workspaces, 0..) |i3_workspace, index| {
         const workspace = &state.workspace_store[index];
@@ -67,7 +69,8 @@ pub fn main() !void {
             state.focused = workspace;
         }
     }
-    try do_cmd(state, &args, socket, alloc);
+    try do_cmd(state, &args, alloc);
+    try exec_i3_commands(socket, alloc, state.commands[0..state.commands_count]);
 }
 
 const Args = struct {
@@ -104,29 +107,128 @@ const Args = struct {
 
 const State = struct {
     workspace_store: [WORKSPACE_COUNT_MAX]Workspace,
+    workspace_count: u32,
     workspaces: []*const Workspace,
     groups: GroupMap,
     focused: ?*const Workspace,
+    commands: [COMMAND_COUNT_MAX]Cmd,
+    commands_count: u32,
 
     const GroupMap = std.StringArrayHashMapUnmanaged(void);
 
     const WORKSPACE_COUNT_MAX: usize = 512;
+    const COMMAND_COUNT_MAX: usize = 512;
+
+    const zero = State{
+        .workspace_store = undefined,
+        .workspace_count = 0,
+        .workspaces = &.{},
+        .groups = undefined,
+        .focused = null,
+        .commands = undefined,
+        .commands_count = 0,
+    };
+
+    const Cmd = union(enum) {
+        rename: struct {
+            source: *const Workspace,
+            target: *const Workspace,
+        },
+        set_focused: *const Workspace,
+        move_container_to_workspace: *const Workspace,
+    };
+
+    fn push_cmd(state: *State, cmd: Cmd) *Cmd {
+        state.commands[state.commands_count] = cmd;
+        state.commands_count += 1;
+        return &state.commands[state.commands_count - 1];
+    }
+
+    fn rename_workspace(state: *State, workspace: *const Workspace) *Workspace {
+        const new_workspace = state.replace_workspace(workspace);
+        _ = state.push_cmd(.{
+            .rename = .{
+                .source = workspace,
+                .target = new_workspace,
+            },
+        });
+        return new_workspace;
+    }
+
+    fn switch_to_workspace(state: *State, workspace: *const Workspace) void {
+        _ = state.push_cmd(.{ .set_focused = workspace });
+    }
+
+    fn move_container_to_workspace(state: *State, workspace: *const Workspace) void {
+        _ = state.push_cmd(.{ .move_container_to_workspace = workspace });
+    }
+
+    fn replace_workspace(state: *State, workspace: *const Workspace) *Workspace {
+        const index = mem.indexOfScalar(*const Workspace, state.workspaces, workspace) orelse unreachable;
+        return state.replace_workspace_at(workspace, @intCast(index));
+    }
+
+    fn replace_workspace_at(state: *State, workspace: *const Workspace, index: u32) *Workspace {
+        state.workspace_store[state.workspace_count] = workspace.*;
+        state.workspace_store[state.workspace_count].i3 = null;
+        state.workspace_count += 1;
+        const result = &state.workspace_store[state.workspace_count - 1];
+        state.workspaces[index] = result;
+        return result;
+    }
+
+    fn find_or_create_workspace(state: *State, alloc: Allocator, group_name: []const u8, name: []const u8, num: u32) !*const Workspace {
+        for (state.workspaces) |workspace| {
+            const group_eql = mem.eql(u8, workspace.group_name, group_name);
+            const name_eql = mem.eql(u8, workspace.name, name);
+            const num_eql = workspace.num == num;
+            if (group_eql and name_eql and num_eql) {
+                return workspace;
+            }
+        }
+
+        return create_workspace(state, alloc, group_name, name, num);
+    }
+
+    fn create_workspace(state: *State, alloc: Allocator, group_name: []const u8, name: []const u8, num: u32) !*Workspace {
+        state.workspace_store[state.workspace_count] = .{
+            .name = name,
+            .group_name = group_name,
+            .num = num,
+            .i3 = null,
+            .output = "",
+        };
+        const new_workspace = &state.workspace_store[state.workspace_count];
+        state.workspace_count += 1;
+        if (!alloc.resize(state.workspaces, state.workspaces.len + 1)) {
+            const workspaces = try alloc.alloc(*const Workspace, state.workspaces.len + 1);
+            @memcpy(workspaces[0..state.workspaces.len], state.workspaces);
+            workspaces[state.workspaces.len] = new_workspace;
+            state.workspaces = workspaces;
+        }
+        return new_workspace;
+    }
 };
 
 const Workspace = struct {
-    id: u64,
-    i3_name: []const u8,
     name: []const u8,
     group_name: []const u8,
     num: u32,
-    num_str: ?[]const u8,
+    i3: ?struct {
+        id: i64,
+        name: []const u8,
+        num: []const u8,
+    },
     output: []const u8,
 
     fn init_in_place_from_i3(this: *Workspace, i3_workspace: I3.Workspace) void {
-        this.id = i3_workspace.id;
-        this.i3_name = i3_workspace.name;
-        this.num = i3_workspace.num;
+        this.i3 = .{
+            .id = i3_workspace.id,
+            .name = i3_workspace.name,
+            .num = "",
+        };
         this.output = i3_workspace.output;
+        this.num = i3_workspace.num;
 
         const count_colons = blk: {
             var count: u32 = 0;
@@ -137,20 +239,20 @@ const Workspace = struct {
         };
         switch (count_colons) {
             0 => {
-                this.num_str = i3_workspace.name;
+                this.i3.?.num = i3_workspace.name;
                 this.group_name = "<default>";
                 this.name = i3_workspace.name;
             },
             1 => {
                 const part = mem.lastIndexOfScalar(u8, i3_workspace.name, ':').?;
-                this.num_str = i3_workspace.name[0..part];
+                this.i3.?.num = i3_workspace.name[0..part];
                 this.group_name = GROUP_NAME_DEFAULT;
                 this.name = i3_workspace.name[part + 1 ..];
             },
             else => {
                 const part_a = mem.indexOfScalar(u8, i3_workspace.name, ':').?;
                 const part_b = mem.indexOfScalarPos(u8, i3_workspace.name, part_a + 1, ':').?;
-                this.num_str = i3_workspace.name[0..part_a];
+                this.i3.?.num = i3_workspace.name[0..part_a];
                 this.group_name = i3_workspace.name[part_a + 1 .. part_b];
                 this.name = i3_workspace.name[part_b + 1 ..];
             },
@@ -182,7 +284,7 @@ const Workspace = struct {
     }
 };
 
-fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !void {
+fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
     switch (args.cmd) {
         .Switch_Active_Workspace_Group => {
             const workspaces = state.workspaces;
@@ -198,8 +300,6 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
             };
             // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
             const is_new = choice == .new;
-
-            const is_default = !is_new and mem.eql(u8, new_workspace_group_name, "<default>");
 
             // ?TODO: consider if focused workspace is also in active workspace group, using it's number
             // TODO: if switching to exisiting group, and not doing current ws number, switch to lowest number in that group
@@ -265,94 +365,45 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
                 // FIXME: handle write or rename failure (easier if writes are batched and we have an intermediate buffer of name mappings)
                 // PERF: batch all rename calls
                 var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
-                var iterations: usize = 0;
 
                 mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
 
                 // TODO: determine if iterations + retries are still necessary with reverse
-                while (iterations < workspaces.len and completed.count() < workspaces.len) : (iterations += 1) {
-                    var idx: usize = workspaces.len;
-                    while (idx > 0) : (idx -= 1) {
-                        const index = idx - 1;
-                        const workspace = workspaces[index];
-                        if (completed.isSet(index)) continue;
+                var idx: usize = workspaces.len;
+                while (idx > 0) : (idx -= 1) {
+                    const index = idx - 1;
+                    const workspace = workspaces[index];
+                    if (completed.isSet(index)) continue;
 
-                        const info = workspace;
+                    const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+                    const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
+                    const is_group_new_active = !is_new and mem.eql(u8, workspace.group_name, new_workspace_group_name);
+                    const num_logical_new = if (is_group_new_active) 0 else new_logical_group_index_map[num_logical_orig];
+                    debug.print(
+                        "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
+                        .{
+                            workspace.i3.?.name,
+                            workspace.name,
+                            num_logical_orig,
+                            num_actual,
+                            num_logical_new,
+                            num_actual,
+                        },
+                    );
 
-                        const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
-                        const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                        const is_group_new_active = !is_new and mem.eql(u8, info.group_name, new_workspace_group_name);
-                        const num_logical_new = if (is_group_new_active) 0 else new_logical_group_index_map[num_logical_orig];
-                        debug.print(
-                            "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
-                            .{
-                                workspace.i3_name,
-                                info.name,
-                                num_logical_orig,
-                                num_actual,
-                                num_logical_new,
-                                num_actual,
-                            },
-                        );
-
-                        const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
-
-                        const is_group_default = mem.eql(u8, info.group_name, "<default>");
-                        // TODO: check if workspace rename is even necessary
-
-                        const command_len =
-                            "rename workspace ".len +
-                            workspace.name.len +
-                            " to ".len +
-                            count_digits(new_combined_num) +
-                            ":".len +
-                            (if (is_group_default) 0 else info.group_name.len + ":".len) +
-                            info.name.len;
-                        try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
-                        var writer = socket.writer();
-                        try writer.writeAll("rename workspace ");
-                        try writer.writeAll(workspace.name);
-                        try writer.writeAll(" to ");
-                        try std.fmt.formatInt(new_combined_num, 10, .lower, .{}, writer);
-                        try writer.writeByte(':');
-                        if (!is_group_default) {
-                            try writer.writeAll(info.group_name);
-                            try writer.writeByte(':');
-                        }
-                        try writer.writeAll(info.name);
-
-                        var success = true;
-                        I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND) catch {
-                            success = false;
-                        };
-                        if (success) {
-                            completed.set(index);
-                        }
-                    }
+                    const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
+                    // TODO: check if workspace rename is even necessary
+                    const new_workspace = state.rename_workspace(workspace);
+                    new_workspace.num = new_combined_num;
                 }
             }
 
-            const command_len =
-                "workspace ".len +
-                count_digits(new_workspace_num) +
-                ":".len +
-                (if (is_default) 0 else new_workspace_group_name.len + ":".len) +
-                count_digits(new_workspace_num);
-
-            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
-
-            var writer = socket.writer();
-
-            try writer.writeAll("workspace ");
-            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, writer);
-            try writer.writeByte(':');
-            if (!is_default) {
-                try writer.writeAll(new_workspace_group_name);
-                try writer.writeByte(':');
-            }
-            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, writer);
-            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
-            return;
+            var buf: std.ArrayList(u8) = .init(alloc);
+            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, buf.writer());
+            const new_workspace_name = buf.items;
+            // TODO: if we already know it's new, just create workspace
+            const new_workspace = try state.find_or_create_workspace(alloc, new_workspace_group_name, new_workspace_name, new_workspace_num);
+            state.switch_to_workspace(new_workspace);
         },
         .Assign_Workspace_To_Group => {
             const workspaces = state.workspaces;
@@ -366,17 +417,6 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
                     .new => |_| return error.TODO_Allow_New_Group,
                     .existing => |group_name_idx| break :blk group_names[group_name_idx],
                 }
-                // const random_group_names = []const u8{"foo", "bar", "baz"};
-                // TODO: allow creating new group
-                // var select = try Rofi.select_writer(alloc, "Workspace Group");
-                // for (group_names) |group_name| {
-                //     try select.writer.writeAll(group_name);
-                //     try select.writer.writeByte('\n');
-                // }
-                // const group_name = try select.finish() orelse return;
-
-                // const group_name = group_names[group_name_idx];
-                // break :blk group_name;
             };
 
             const group_logical_num = blk: for (workspaces) |workspace| {
@@ -384,8 +424,6 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
                     break :blk @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
                 }
             } else unreachable;
-
-            const active_workspace_name_info = active_workspace;
 
             const active_workspace_actual_num = active_workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
 
@@ -404,20 +442,9 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
 
             const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + active_workspace_actual_num;
 
-            try I3.exec_command_len(
-                socket,
-                .RUN_COMMAND,
-                @intCast("rename workspace ".len +
-                    active_workspace.name.len +
-                    " to ".len +
-                    workspace_name_parts_len(active_workspace_num, group_name, active_workspace_name_info.name)),
-            );
-            var writer = socket.writer();
-            try writer.writeAll("rename workspace ");
-            try writer.writeAll(active_workspace.name);
-            try writer.writeAll(" to ");
-            try write_workspace_name_parts(writer, active_workspace_num, group_name, active_workspace_name_info.name);
-            return;
+            const new_workspace = state.rename_workspace(active_workspace);
+            new_workspace.group_name = group_name;
+            new_workspace.num = active_workspace_num;
         },
         .Rename_Workspace => {
             return error.NotImplemented;
@@ -466,63 +493,45 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
             // - if it exists identify he name and switch to it
             // - else create number for it and format name before switching to it
 
-            const workspace_name = blk: {
+            const workspace_to_switch_to = blk: {
                 // TODO: clone this logic (extract to fn?) to move container to workspace
                 const maybe_num = std.fmt.parseInt(u32, name, 10) catch null;
 
                 const group_num_max = gnm: {
                     var group_num_max: u32 = 0;
                     for (workspaces) |workspace| {
-                        const is_in_active_workspace_group = is_in_active_group(workspace);
-                        if (is_in_active_workspace_group and workspace.num <= 10 and workspace.num > group_num_max) {
-                            group_num_max = workspace.num;
+                        if (is_in_active_group(workspace)) {
+                            group_num_max = @max(group_num_max, workspace.num);
                         }
                     }
                     break :gnm group_num_max;
                 };
 
-                var workspace_name = try ArrayList(u8).initCapacity(alloc, 3 + active_workspace_group.len + name.len);
-                const writer = workspace_name.writer();
-
                 if (maybe_num) |num| {
                     debug.print("is num\n", .{});
                     if (num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
                         for (workspaces) |workspace| {
-                            const is_in_active_workspace_group = is_in_active_group(workspace);
-                            if (is_in_active_workspace_group and num == workspace.num) {
-                                debug.print("workspace '{s}' exists\n", .{workspace.name});
-                                workspace_name.deinit();
-                                break :blk workspace.name;
+                            if (is_in_active_group(workspace) and num == workspace.num) {
+                                break :blk workspace;
                             }
                         } else {
                             const workspace_num = if (num < 10) num else group_num_max + 1;
-                            try write_workspace_name_parts(writer, workspace_num, active_workspace_group, name);
-                            debug.print("creating workspace named '{s}'\n", .{workspace_name.items});
-                            break :blk workspace_name.items;
+                            break :blk try state.find_or_create_workspace(alloc, active_workspace_group, name, workspace_num);
                         }
                     }
                 } else {
                     // otherwise look for a workspace named $name and if we find it return it so we get the workspace number correct
                     for (workspaces) |workspace| {
-                        const is_in_active_workspace_group = is_in_active_group(workspace);
-                        if (is_in_active_workspace_group and mem.eql(u8, workspace.name, name)) {
-                            break :blk workspace.name;
+                        if (is_in_active_group(workspace) and mem.eql(u8, workspace.name, name)) {
+                            break :blk workspace;
                         }
                     }
                 }
 
-                debug.print("creating non-num workspace named '{s}'\n", .{workspace_name.items});
-                try write_workspace_name_parts(writer, group_num_max + 1, active_workspace_group, name);
-                break :blk workspace_name.items;
+                break :blk try state.find_or_create_workspace(alloc, active_workspace_group, name, group_num_max + 1);
             };
 
-            const command_len = "workspace ".len + workspace_name.len;
-            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
-            var writer = socket.writer();
-            try writer.writeAll("workspace ");
-            try writer.writeAll(workspace_name);
-
-            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+            state.switch_to_workspace(workspace_to_switch_to);
         },
         .Move_Active_Container_To_Workspace => {
             const workspaces = state.workspaces;
@@ -603,27 +612,32 @@ fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !voi
                 workspace_num += (INACTIVE_WORKSPACE_GROUP_FACTOR * workspace_logical_group_index);
             }
 
-            const command_len =
-                "move container to workspace ".len +
-                workspace_name_parts_len(
-                    workspace_num,
-                    workspace_group_name,
-                    workspace_name,
-                );
-            try I3.exec_command_len(socket, .RUN_COMMAND, @intCast(command_len));
-            var writer = socket.writer();
-            try writer.writeAll("move container to workspace ");
-            try write_workspace_name_parts(
-                writer,
-                workspace_num,
-                workspace_group_name,
-                workspace_name,
-            );
-            try I3.read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+            const workspace_to_move_to = try state.find_or_create_workspace(alloc, workspace_group_name, workspace_name, workspace_num);
+            state.move_container_to_workspace(workspace_to_move_to);
         },
         .Pretty_List_Workspaces => {
             try pretty_list_workspaces(alloc, state);
         },
+    }
+}
+
+fn exec_i3_commands(socket: net.Stream, alloc: Allocator, commands: []State.Cmd) !void {
+    for (commands) |command| {
+        switch (command) {
+            .move_container_to_workspace => |workspace| {
+                const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
+                try I3.move_active_container_to_workspace(socket, alloc, name);
+            },
+            .rename => |data| {
+                const source = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.source);
+                const target = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.target);
+                try I3.rename_workspace(socket, alloc, source, target);
+            },
+            .set_focused => |workspace| {
+                const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
+                try I3.switch_to_workspace(socket, alloc, name);
+            },
+        }
     }
 }
 
@@ -659,9 +673,26 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
         }
         debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
         debug.print("{s}  group: {s}\n", .{ prefix, workspace.group_name });
-        debug.print("{s}  id: {d}\n", .{ prefix, workspace.id });
+        debug.print("{s}  id: {d}\n", .{ prefix, if (workspace.i3) |i3_data| i3_data.id else 0 });
         debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
     }
+}
+
+fn alloc_print_workspace_name_or_i3_name_if_set(alloc: Allocator, workspace: *const Workspace) ![]const u8 {
+    if (workspace.i3) |i3_data| {
+        return i3_data.name;
+    }
+    return alloc_print_workspace_name(alloc, workspace);
+}
+
+fn alloc_print_workspace_name(alloc: Allocator, workspace: *const Workspace) ![]const u8 {
+    const group_name = workspace.group_name;
+    const num = workspace.num;
+    const name = workspace.name;
+    const buf = try alloc.alloc(u8, workspace_name_parts_len(num, group_name, name));
+    var buf_stream = std.io.fixedBufferStream(buf);
+    try write_workspace_name_parts(buf_stream.writer(), num, group_name, name);
+    return buf;
 }
 
 fn write_workspace_name_parts(writer: anytype, num: u32, group_name: []const u8, name: []const u8) !void {

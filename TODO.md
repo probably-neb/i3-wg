@@ -6,9 +6,12 @@
 
 ## Current
 
-- [ ] Make do_cmd take in Cli_Cmd_w/_args
-- [ ] Write tests for do_cmd with mocked socket and constructed cmd
+- [ ] Transition to using State.Cmd buffer
+- [ ] Write tests for do_cmd with constructed args
+    - [ ] String representation -> State
+    - [ ] Compare string representation of cmd buf to expected output
 - [ ] Clean
+    - [ ] Have groups be [GROUPS_MAX]group_name and indexed by global index
 
 ## Additional Commands
 
@@ -19,6 +22,11 @@
 - [ ] save group command? (get + parse tree -> save to sqlite or something)
 
 ## Issues
-   - [ ] Default to i3-input with no rofi
-   - [ ] don't create new '2:2' if '2' already exists (Move_Active_Container_To_Workspace)
-   - [ ] Create README
+- [ ] Identify required "fixups"
+    - [ ] Items with no group -> Default
+    - [ ] Conflicting group logical indices
+- [ ] Nail down when to try and parse name as num "name_num" or i3.name
+- [ ] Default to i3-input with no rofi
+- [ ] don't create new '2:2' if '2' already exists (Move_Active_Container_To_Workspace)
+- [ ] Create README
+- [ ] Create ability to merge workspaces (move all containers from one workspace to another)
