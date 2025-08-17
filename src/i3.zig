@@ -29,6 +29,7 @@ fn get_version(socket: net.Stream, alloc: Allocator) !Version {
 pub const Workspace = struct {
     id: i64,
     name: []const u8,
+    // PERF: don't parse useless data
     rect: struct {
         x: u32,
         y: u32,

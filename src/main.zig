@@ -156,8 +156,9 @@ const State = struct {
         return &state.commands[state.commands_count - 1];
     }
 
-    fn rename_workspace(state: *State, workspace: *const Workspace) *Workspace {
-        const new_workspace = state.replace_workspace(workspace);
+    fn rename_workspace(state: *State, workspace: *const Workspace, workspace_index: ?usize) *Workspace {
+        const index = workspace_index orelse mem.indexOfScalar(*const Workspace, state.workspaces, workspace) orelse unreachable;
+        const new_workspace = state.replace_workspace_at(workspace, index);
         _ = state.push_cmd(.{
             .rename = .{
                 .source = workspace,
@@ -175,12 +176,7 @@ const State = struct {
         _ = state.push_cmd(.{ .move_container_to_workspace = workspace });
     }
 
-    fn replace_workspace(state: *State, workspace: *const Workspace) *Workspace {
-        const index = mem.indexOfScalar(*const Workspace, state.workspaces, workspace) orelse unreachable;
-        return state.replace_workspace_at(workspace, @intCast(index));
-    }
-
-    fn replace_workspace_at(state: *State, workspace: *const Workspace, index: u32) *Workspace {
+    fn replace_workspace_at(state: *State, workspace: *const Workspace, index: usize) *Workspace {
         state.workspace_store[state.workspace_count] = workspace.*;
         state.workspace_store[state.workspace_count].i3 = null;
         state.workspace_count += 1;
@@ -312,6 +308,14 @@ const Workspace = struct {
 };
 
 fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
+    // apply fixups for default i3 workspace names
+    // for (state.workspaces, 0..) |workspace, index| {
+    //     const i3_data = workspace.i3 orelse continue;
+    //     const is_default_i3_workspace = workspace.group_name.ptr == GROUP_NAME_DEFAULT.ptr and mem.indexOfScalar(u8, i3_data.name, ':') == null and count_digits(workspace.num) == i3_data.name.len;
+    //     if (is_default_i3_workspace) {
+    //         _ = state.rename_workspace(workspace, index);
+    //     }
+    // }
     switch (args.cmd) {
         .Switch_Active_Workspace_Group => {
             const workspaces = state.workspaces;
@@ -420,7 +424,8 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
                     const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
                     // TODO: check if workspace rename is even necessary
-                    const new_workspace = state.rename_workspace(workspace);
+                    // PERF: workspace index here
+                    const new_workspace = state.rename_workspace(workspace, null);
                     new_workspace.num = new_combined_num;
                 }
             }
@@ -469,7 +474,8 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
             const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + active_workspace_actual_num;
 
-            const new_workspace = state.rename_workspace(active_workspace);
+            // PERF: workspace index
+            const new_workspace = state.rename_workspace(active_workspace, null);
             new_workspace.group_name = group_name;
             new_workspace.num = active_workspace_num;
         },
@@ -521,8 +527,6 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
             const workspace_to_switch_to = blk: {
                 // TODO: clone this logic (extract to fn?) to move container to workspace
-                const maybe_num = std.fmt.parseInt(u32, name, 10) catch null;
-
                 const group_num_max = gnm: {
                     var group_num_max: u32 = 0;
                     for (workspaces) |workspace| {
@@ -533,7 +537,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                     break :gnm group_num_max;
                 };
 
-                if (maybe_num) |num| {
+                if (std.fmt.parseInt(u32, name, 10) catch null) |num| {
                     if (num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
                         for (workspaces) |workspace| {
                             if (is_in_active_group(workspace) and num == workspace.num) {
@@ -849,6 +853,10 @@ fn init_workspace_from_test_name(workspace: *Workspace, test_name: []const u8) b
         name = name[0 .. name.len - 2];
     }
     Workspace.init_in_place_from_name(workspace, name);
+    workspace.i3 = .{
+        .id = @bitCast(@intFromPtr(workspace)),
+        .name = name,
+    };
     return focused;
 }
 
@@ -878,6 +886,19 @@ fn check_do_cmd(
         const msg = try alloc.alloc(u8, msg_length);
         try std.testing.expectEqual(msg_length, try cmd_stream_out.reader().readAtLeast(msg, msg_length));
         try commands.append(msg);
+    }
+
+    if (expected_commands.len != commands.items.len) {
+        const print = debug.print;
+        print("Command Count Mismatch:\n\nExpected commands:\n", .{});
+        for (expected_commands) |expected| {
+            print("  {s}\n", .{expected});
+        }
+        print("\nActual commands:\n", .{});
+        for (commands.items) |actual| {
+            print("  {s}\n", .{actual});
+        }
+        return error.UnexpectedCommands;
     }
 
     for (expected_commands, commands.items) |expected, actual| {
