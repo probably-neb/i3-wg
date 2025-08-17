@@ -22,6 +22,7 @@
 - [ ] save group command? (get + parse tree -> save to sqlite or something)
 
 ## Issues
+- [ ] Fix handling of workspaces with no num like `foo:baz`
 - [ ] Identify required "fixups"
     - [ ] Items with no group -> Default
     - [ ] Conflicting group logical indices

@@ -51,26 +51,9 @@ pub fn main() !void {
     const i3_workspaces = try I3.get_workspaces(socket, alloc);
 
     var state = try alloc.create(State);
-    state.* = .zero;
-    state.groups = try .init(alloc, &.{}, &.{});
-    try state.groups.ensureTotalCapacity(alloc, i3_workspaces.len);
-    state.workspaces = try alloc.alloc((*const Workspace), i3_workspaces.len);
-    state.workspace_count = @intCast(i3_workspaces.len);
-
-    for (i3_workspaces, 0..) |i3_workspace, index| {
-        const workspace = &state.workspace_store[index];
-        Workspace.init_in_place_from_i3(workspace, i3_workspace);
-        const group_entry = state.groups.getOrPutAssumeCapacity(workspace.group_name);
-        if (group_entry.found_existing) {
-            workspace.group_name = group_entry.key_ptr.*;
-        }
-        state.workspaces[index] = workspace;
-        if (i3_workspace.focused) {
-            state.focused = workspace;
-        }
-    }
+    try state.init_in_place_with_workspace_init(I3.Workspace, alloc, i3_workspaces, Workspace.init_in_place_from_i3);
     try do_cmd(state, &args, alloc);
-    try exec_i3_commands(socket, alloc, state.commands[0..state.commands_count]);
+    try exec_i3_commands(I3, socket, alloc, state.commands[0..state.commands_count]);
 }
 
 const Args = struct {
@@ -81,7 +64,15 @@ const Args = struct {
     fn from_process_args(alloc: Allocator) ?Args {
         var args_iter = try std.process.argsWithAllocator(alloc);
         debug.assert(args_iter.skip());
+        return from_iter(alloc, &args_iter);
+    }
 
+    fn from_cmd_str(alloc: Allocator, args: []const u8) ?Args {
+        var iter = mem.tokenizeScalar(u8, args, ' ');
+        return from_iter(alloc, &iter);
+    }
+
+    fn from_iter(alloc: Allocator, args_iter: anytype) ?Args {
         const cmd_str = args_iter.next() orelse return null;
         const cmd = Cli_Command.Map.get(cmd_str) orelse return null;
         var positionals: ArrayList([]const u8) = .init(alloc);
@@ -137,6 +128,27 @@ const State = struct {
         set_focused: *const Workspace,
         move_container_to_workspace: *const Workspace,
     };
+
+    fn init_in_place_with_workspace_init(state: *State, comptime Item: type, alloc: Allocator, items: []const Item, init_workspace: *const fn (*Workspace, Item) bool) !void {
+        state.* = .zero;
+        state.groups = try .init(alloc, &.{}, &.{});
+        try state.groups.ensureTotalCapacity(alloc, items.len);
+        state.workspaces = try alloc.alloc((*const Workspace), items.len);
+        state.workspace_count = @intCast(items.len);
+
+        for (items, 0..) |item, index| {
+            const workspace = &state.workspace_store[index];
+            const focused = init_workspace(workspace, item);
+            const group_entry = state.groups.getOrPutAssumeCapacity(workspace.group_name);
+            if (group_entry.found_existing) {
+                workspace.group_name = group_entry.key_ptr.*;
+            }
+            state.workspaces[index] = workspace;
+            if (focused) {
+                state.focused = workspace;
+            }
+        }
+    }
 
     fn push_cmd(state: *State, cmd: Cmd) *Cmd {
         state.commands[state.commands_count] = cmd;
@@ -217,45 +229,60 @@ const Workspace = struct {
     i3: ?struct {
         id: i64,
         name: []const u8,
-        num: []const u8,
     },
     output: []const u8,
 
-    fn init_in_place_from_i3(this: *Workspace, i3_workspace: I3.Workspace) void {
+    const zero = Workspace{
+        .name = "",
+        .group_name = "",
+        .num = 0,
+        .i3 = null,
+        .output = "",
+    };
+
+    fn init_in_place_from_i3(this: *Workspace, i3_workspace: I3.Workspace) bool {
+        this.init_in_place_from_name(i3_workspace.name);
         this.i3 = .{
             .id = i3_workspace.id,
             .name = i3_workspace.name,
-            .num = "",
         };
         this.output = i3_workspace.output;
         this.num = i3_workspace.num;
+        return i3_workspace.focused;
+    }
 
+    fn init_in_place_from_name(this: *Workspace, name: []const u8) void {
+        this.* = .zero;
         const count_colons = blk: {
             var count: u32 = 0;
-            for (i3_workspace.name) |c| {
+            for (name) |c| {
                 count += @intFromBool(c == ':');
             }
             break :blk count;
         };
+        var possible_num = name;
         switch (count_colons) {
             0 => {
-                this.i3.?.num = i3_workspace.name;
                 this.group_name = "<default>";
-                this.name = i3_workspace.name;
+                this.name = name;
+                possible_num = name;
             },
             1 => {
-                const part = mem.lastIndexOfScalar(u8, i3_workspace.name, ':').?;
-                this.i3.?.num = i3_workspace.name[0..part];
+                const part = mem.lastIndexOfScalar(u8, name, ':').?;
                 this.group_name = GROUP_NAME_DEFAULT;
-                this.name = i3_workspace.name[part + 1 ..];
+                this.name = name[part + 1 ..];
+                possible_num = name[part + 1 ..];
             },
             else => {
-                const part_a = mem.indexOfScalar(u8, i3_workspace.name, ':').?;
-                const part_b = mem.indexOfScalarPos(u8, i3_workspace.name, part_a + 1, ':').?;
-                this.i3.?.num = i3_workspace.name[0..part_a];
-                this.group_name = i3_workspace.name[part_a + 1 .. part_b];
-                this.name = i3_workspace.name[part_b + 1 ..];
+                const part_a = mem.indexOfScalar(u8, name, ':').?;
+                const part_b = mem.indexOfScalarPos(u8, name, part_a + 1, ':').?;
+                possible_num = name[0..part_a];
+                this.group_name = name[part_a + 1 .. part_b];
+                this.name = name[part_b + 1 ..];
             },
+        }
+        if (std.fmt.parseInt(u32, possible_num, 10) catch null) |num| {
+            this.num = num;
         }
     }
 
@@ -487,7 +514,6 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 }
                 break :blk name;
             };
-            debug.print("name = {s}\n", .{name});
             // TODO:
             // - identify whether chosen workspace already exists (and is active workspace group)
             // - if it exists identify he name and switch to it
@@ -508,7 +534,6 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 };
 
                 if (maybe_num) |num| {
-                    debug.print("is num\n", .{});
                     if (num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
                         for (workspaces) |workspace| {
                             if (is_in_active_group(workspace) and num == workspace.num) {
@@ -621,21 +646,21 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
     }
 }
 
-fn exec_i3_commands(socket: net.Stream, alloc: Allocator, commands: []State.Cmd) !void {
+fn exec_i3_commands(I3_Impl: anytype, socket: anytype, alloc: Allocator, commands: []State.Cmd) !void {
     for (commands) |command| {
         switch (command) {
             .move_container_to_workspace => |workspace| {
                 const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
-                try I3.move_active_container_to_workspace(socket, alloc, name);
+                try I3_Impl.move_active_container_to_workspace(socket, alloc, name);
             },
             .rename => |data| {
                 const source = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.source);
                 const target = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.target);
-                try I3.rename_workspace(socket, alloc, source, target);
+                try I3_Impl.rename_workspace(socket, alloc, source, target);
             },
             .set_focused => |workspace| {
                 const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
-                try I3.switch_to_workspace(socket, alloc, name);
+                try I3_Impl.switch_to_workspace(socket, alloc, name);
             },
         }
     }
@@ -822,4 +847,59 @@ test count_digits {
     try std.testing.expectEqual(3, count_digits(100));
     try std.testing.expectEqual(3, count_digits(999));
     try std.testing.expectEqual(4, count_digits(-1000));
+}
+
+fn init_workspace_from_test_name(workspace: *Workspace, test_name: []const u8) bool {
+    var focused = false;
+    var name = test_name;
+    if (mem.endsWith(u8, name, "<-")) {
+        focused = true;
+        name = name[0 .. name.len - 2];
+    }
+    Workspace.init_in_place_from_name(workspace, name);
+    return focused;
+}
+
+fn check_do_cmd(
+    workspace_names: []const []const u8,
+    args_str: []const u8,
+    expected_commands: []const []const u8,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var state: State = undefined;
+    try state.init_in_place_with_workspace_init([]const u8, alloc, workspace_names, init_workspace_from_test_name);
+    var args = Args.from_cmd_str(alloc, args_str).?;
+    try do_cmd(&state, &args, alloc);
+
+    var cmd_stream = std.ArrayList(u8).init(alloc);
+
+    try exec_i3_commands(I3.Mock, cmd_stream.writer().any(), alloc, state.commands[0..state.commands_count]);
+
+    var commands = std.ArrayList([]const u8).init(alloc);
+    var cmd_stream_out = std.io.fixedBufferStream(cmd_stream.items);
+    while (try cmd_stream_out.getEndPos() > try cmd_stream_out.getPos()) {
+        const msg_length = try I3.read_msg_header(cmd_stream_out.reader());
+        _ = try I3.read_msg_kind(I3.Command, cmd_stream_out.reader());
+        const msg = try alloc.alloc(u8, msg_length);
+        try std.testing.expectEqual(msg_length, try cmd_stream_out.reader().readAtLeast(msg, msg_length));
+        try commands.append(msg);
+    }
+
+    for (expected_commands, commands.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "basic_change_focus" {
+    try check_do_cmd(
+        &.{
+            "1:1<-",
+            "2:2",
+        },
+        "focus-workspace 2",
+        &.{"workspace 2:2"},
+    );
 }
