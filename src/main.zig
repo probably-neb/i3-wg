@@ -40,15 +40,7 @@ pub fn main() !void {
     var arena_alloc = std.heap.ArenaAllocator.init(base_alloc);
     const alloc = arena_alloc.allocator();
 
-    var args_iter = try std.process.argsWithAllocator(alloc);
-    debug.assert(args_iter.skip());
-
-    const maybe_cmd: ?Cli_Command = if (args_iter.next()) |cmd_str|
-        // TODO: suggest command in case of misspelling
-        Cli_Command.Map.get(cmd_str)
-    else
-        null;
-    const cmd: Cli_Command = maybe_cmd orelse {
+    var args = Args.from_process_args(alloc) orelse {
         // TODO: implement help
         return error.Help_Not_Implemented;
     };
@@ -75,13 +67,40 @@ pub fn main() !void {
             state.focused = workspace;
         }
     }
-    // TODO: actually use
-    if (false) {
-        const cmd_with_args = try fill_cmd_args(cmd, state, &args_iter, alloc);
-        _ = cmd_with_args;
-    }
-    try do_cmd(state, cmd, &args_iter, socket, alloc);
+    try do_cmd(state, &args, socket, alloc);
 }
+
+const Args = struct {
+    cmd: Cli_Command,
+    positionals: []const []const u8,
+    positional_index: u32,
+
+    fn from_process_args(alloc: Allocator) ?Args {
+        var args_iter = try std.process.argsWithAllocator(alloc);
+        debug.assert(args_iter.skip());
+
+        const cmd_str = args_iter.next() orelse return null;
+        const cmd = Cli_Command.Map.get(cmd_str) orelse return null;
+        var positionals: ArrayList([]const u8) = .init(alloc);
+        while (args_iter.next()) |positional| {
+            positionals.append(positional) catch return null;
+        }
+
+        return .{
+            .cmd = cmd,
+            .positionals = positionals.items,
+            .positional_index = 0,
+        };
+    }
+
+    fn next(this: *Args) ?[]const u8 {
+        if (this.positional_index >= this.positionals.len) {
+            return null;
+        }
+        this.positional_index += 1;
+        return this.positionals[this.positional_index - 1];
+    }
+};
 
 const State = struct {
     workspace_store: [WORKSPACE_COUNT_MAX]Workspace,
@@ -163,124 +182,8 @@ const Workspace = struct {
     }
 };
 
-const Cli_Command_With_Arguments = struct {
-    cmd: Cli_Command,
-    workspace_name: []const u8,
-    group_name: []const u8,
-    is_new: bool,
-
-    fn zero(cmd: Cli_Command) @This() {
-        return .{
-            .cmd = cmd,
-            .workspace_name = "",
-            .group_name = "",
-            .is_new = false,
-        };
-    }
-};
-
-// TODO: rename alloc -> arena
-fn fill_cmd_args(cmd: Cli_Command, state: *const State, args_iter: *std.process.ArgIterator, alloc: Allocator) !Cli_Command_With_Arguments {
-    var get_group = false;
-    var get_workspace = false;
-    var rofi_label: []const u8 = "";
-    var result: Cli_Command_With_Arguments = .zero(cmd);
-
-    switch (cmd) {
-        .Pretty_List_Workspaces => {
-            return result;
-        },
-        .Switch_Active_Workspace_Group => {
-            get_group = true;
-            rofi_label = "Switch Active Workspace Group";
-        },
-        .Assign_Workspace_To_Group => {
-            get_group = true;
-            rofi_label = "Workspace Group";
-        },
-        .Rename_Workspace => {
-            get_workspace = true;
-        },
-        .Focus_Workspace => {
-            get_workspace = true;
-        },
-        .Move_Active_Container_To_Workspace => {
-            get_workspace = true;
-        },
-    }
-
-    const workspaces = state.workspaces;
-    if (get_group) get_group: {
-        const group_names = try alloc.dupe([]const u8, state.groups.keys());
-        sort_alphabetically(group_names);
-        if (args_iter.next()) |group_name| {
-            result.group_name = group_name;
-            result.is_new = blk: for (group_names) |existing_group_name| {
-                if (mem.eql(u8, group_name, existing_group_name)) {
-                    break :blk false;
-                }
-            } else true;
-            break :get_group;
-        }
-        // TODO: ensure default group is always shown?
-        const choice = try Rofi.select_or_new(alloc, rofi_label, group_names) orelse return error.Aborted;
-        // TODO: if new_workspace_group_name already exists, don't rename all workspaces
-        // TODO: allow entering `group_name:workspace_name` to create new workspace with non number workspace name
-
-        // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
-        result.group_name = switch (choice) {
-            .new => |name| name,
-            .existing => |index| group_names[index],
-        };
-        result.is_new = choice == .new;
-    }
-
-    if (get_workspace) get_workspace: {
-        if (args_iter.next()) |workspace_name| {
-            result.workspace_name = workspace_name;
-            break :get_workspace;
-        }
-        mem.sort(I3.Workspace, workspaces, {}, I3.Workspace.sort_by_logical_num_and_name_less_than);
-        var names = try ArrayList(I3.Workspace.NameInfo).initCapacity(alloc, workspaces.len);
-        var group_name_len_max: u64 = 0;
-        var name_len_max: u64 = 0;
-
-        for (workspaces) |workspace| {
-            const pair = I3.Workspace.get_name_info(workspace);
-            if (pair.group_name.len > group_name_len_max) {
-                group_name_len_max = pair.group_name.len;
-            }
-            if (pair.name.len > name_len_max) {
-                name_len_max = pair.name.len;
-            }
-            names.appendAssumeCapacity(pair);
-        }
-
-        var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
-        // TODO: Pango markup help text here
-
-        for (names.items) |pair| {
-            try selection.writer.writeByteNTimes(' ', group_name_len_max -| pair.group_name.len);
-            try selection.writer.writeAll(pair.group_name);
-            try selection.writer.writeByteNTimes(' ', name_len_max -| pair.name.len + 2);
-            try selection.writer.writeAll(pair.name);
-            try selection.writer.writeByte('\n');
-        }
-        const choice = (try selection.finish()) orelse return error.Aborted;
-        var choice_iter = mem.tokenizeScalar(u8, choice, ' ');
-        _ = choice_iter.next();
-        const name = choice_iter.rest();
-        if (name.len == 0) {
-            return error.InvalidChoice;
-        }
-        result.workspace_name = name;
-    }
-
-    return result;
-}
-
-fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, socket: net.Stream, alloc: Allocator) !void {
-    switch (cmd) {
+fn do_cmd(state: *State, args: *Args, socket: net.Stream, alloc: Allocator) !void {
+    switch (args.cmd) {
         .Switch_Active_Workspace_Group => {
             const workspaces = state.workspaces;
             const group_names = try alloc.dupe([]const u8, state.groups.keys());
@@ -455,7 +358,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             const workspaces = state.workspaces;
             const active_workspace = state.focused orelse return error.NoFocusedWorkspace;
 
-            const group_name = if (args_iter.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
+            const group_name = if (args.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
                 const group_names = try alloc.dupe([]const u8, state.groups.keys());
                 sort_alphabetically(group_names);
                 const choice = try Rofi.select_or_new(alloc, "Workspace Group", group_names) orelse return;
@@ -526,7 +429,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
             // FIXME: how to handle no active group and no group name...
             const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
 
-            const name = if (args_iter.next()) |arg| arg else blk: {
+            const name = if (args.next()) |arg| arg else blk: {
                 mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
                 var group_name_len_max: u64 = 0;
                 var name_len_max: u64 = 0;
@@ -624,7 +527,7 @@ fn do_cmd(state: *State, cmd: Cli_Command, args_iter: *std.process.ArgIterator, 
         .Move_Active_Container_To_Workspace => {
             const workspaces = state.workspaces;
 
-            const workspace_user_name = if (args_iter.next()) |arg| arg else blk: {
+            const workspace_user_name = if (args.next()) |arg| arg else blk: {
                 var active_group_workspaces = std.ArrayListUnmanaged(*const Workspace).fromOwnedSlice(try alloc.dupe(*const Workspace, state.workspaces));
                 var group_name_len_max: u64 = 0;
                 var i: u32 = 0;
