@@ -893,7 +893,7 @@ fn check_do_cmd(
     }
 }
 
-test "basic_change_focus" {
+test "focus-workspace_basic" {
     try check_do_cmd(
         &.{
             "1:1<-",
@@ -901,5 +901,33 @@ test "basic_change_focus" {
         },
         "focus-workspace 2",
         &.{"workspace 2:2"},
+    );
+}
+
+test "focus-workspace_multi_group" {
+    try check_do_cmd(
+        &.{
+            "1:active:1",
+            "2:active:2",
+            "3:active:3<-",
+            "10001:inactive:1",
+            "10002:inactive:2",
+        },
+        "focus-workspace 1",
+        &.{"workspace 1:active:1"},
+    );
+}
+
+test "focus-workspace_multi_group_from_inactive_group" {
+    try check_do_cmd(
+        &.{
+            "1:active:1",
+            "2:active:2",
+            "3:active:3",
+            "10001:inactive:1",
+            "10002:inactive:2<-",
+        },
+        "focus-workspace 1",
+        &.{"workspace 1:active:1"},
     );
 }
