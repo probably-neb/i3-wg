@@ -40,49 +40,6 @@ pub const Workspace = struct {
     urgent: bool,
     focused: bool,
 
-    const NameInfo = struct {
-        num: ?[]const u8,
-        group_name: []const u8,
-        name: []const u8,
-    };
-
-    pub fn get_name_info(self: *const Workspace) NameInfo {
-        const count_colons = blk: {
-            var count: u32 = 0;
-            for (self.name) |c| {
-                count += @intFromBool(c == ':');
-            }
-            break :blk count;
-        };
-        switch (count_colons) {
-            0 => return .{ .num = self.name, .group_name = "<default>", .name = self.name },
-            1 => {
-                const part = mem.lastIndexOfScalar(u8, self.name, ':').?;
-                return .{ .num = self.name[0..part], .group_name = "<default>", .name = self.name[part + 1 ..] };
-            },
-            else => {
-                const part_a = mem.indexOfScalar(u8, self.name, ':').?;
-                const part_b = mem.indexOfScalarPos(u8, self.name, part_a + 1, ':').?;
-                return .{
-                    .num = self.name[0..part_a],
-                    .group_name = self.name[part_a + 1 .. part_b],
-                    .name = self.name[part_b + 1 ..],
-                };
-            },
-        }
-    }
-
-    pub fn get_group_name(self: Workspace) []const u8 {
-        var section_iter = mem.tokenizeScalar(u8, self.name, ':');
-        _ = section_iter.next();
-        var group_name = section_iter.next() orelse "<default>";
-        if (section_iter.next() == null) {
-            // set group name to default if only 2 sections
-            group_name = "<default>";
-        }
-        return group_name;
-    }
-
     pub fn format(self: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.writeAll("Workspace{ ");
         const fields = .{ "id", "name", "rect", "output", "num", "urgent", "focused" };
