@@ -647,6 +647,8 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 }
 
 fn exec_i3_commands(I3_Impl: anytype, socket: anytype, alloc: Allocator, commands: []State.Cmd) !void {
+    // PERF: make i3 exec functions take anytypes, and create a format wrapper for Workspace
+    //       so that we avoid allocating here, and instead write direct to io
     for (commands) |command| {
         switch (command) {
             .move_container_to_workspace => |workspace| {
@@ -839,16 +841,6 @@ fn count_digits(num: anytype) usize {
     return std.math.log10_int(val) + 1;
 }
 
-test count_digits {
-    try std.testing.expectEqual(1, count_digits(1));
-    try std.testing.expectEqual(1, count_digits(0));
-    try std.testing.expectEqual(2, count_digits(10));
-    try std.testing.expectEqual(2, count_digits(99));
-    try std.testing.expectEqual(3, count_digits(100));
-    try std.testing.expectEqual(3, count_digits(999));
-    try std.testing.expectEqual(4, count_digits(-1000));
-}
-
 fn init_workspace_from_test_name(workspace: *Workspace, test_name: []const u8) bool {
     var focused = false;
     var name = test_name;
@@ -893,41 +885,73 @@ fn check_do_cmd(
     }
 }
 
-test "focus-workspace_basic" {
-    try check_do_cmd(
-        &.{
-            "1:1<-",
-            "2:2",
-        },
-        "focus-workspace 2",
-        &.{"workspace 2:2"},
-    );
+test count_digits {
+    try std.testing.expectEqual(1, count_digits(1));
+    try std.testing.expectEqual(1, count_digits(0));
+    try std.testing.expectEqual(2, count_digits(10));
+    try std.testing.expectEqual(2, count_digits(99));
+    try std.testing.expectEqual(3, count_digits(100));
+    try std.testing.expectEqual(3, count_digits(999));
+    try std.testing.expectEqual(4, count_digits(-1000));
 }
 
-test "focus-workspace_multi_group" {
-    try check_do_cmd(
-        &.{
-            "1:active:1",
-            "2:active:2",
-            "3:active:3<-",
-            "10001:inactive:1",
-            "10002:inactive:2",
-        },
-        "focus-workspace 1",
-        &.{"workspace 1:active:1"},
-    );
+const file = @This();
+test file {
+    std.testing.refAllDeclsRecursive(file);
 }
 
-test "focus-workspace_multi_group_from_inactive_group" {
-    try check_do_cmd(
-        &.{
-            "1:active:1",
-            "2:active:2",
-            "3:active:3",
-            "10001:inactive:1",
-            "10002:inactive:2<-",
-        },
-        "focus-workspace 1",
-        &.{"workspace 1:active:1"},
-    );
+test "cmd" {
+    const @"focus-workspace" = struct {
+        test "basic" {
+            try check_do_cmd(
+                &.{
+                    "1:1<-",
+                    "2:2",
+                },
+                "focus-workspace 2",
+                &.{"workspace 2:2"},
+            );
+        }
+
+        test "multi-group" {
+            try check_do_cmd(
+                &.{
+                    "1:active:1",
+                    "2:active:2",
+                    "3:active:3<-",
+                    "10001:inactive:1",
+                    "10002:inactive:2",
+                },
+                "focus-workspace 1",
+                &.{"workspace 1:active:1"},
+            );
+        }
+
+        test "multi-group-from-inactive-group" {
+            try check_do_cmd(
+                &.{
+                    "1:active:1",
+                    "2:active:2",
+                    "3:active:3",
+                    "10001:inactive:1",
+                    "10002:inactive:2<-",
+                },
+                "focus-workspace 1",
+                &.{"workspace 1:active:1"},
+            );
+        }
+
+        test "default-i3-names" {
+            try check_do_cmd(
+                &.{
+                    "1",
+                    "2",
+                    "3<-",
+                },
+                "focus-workspace 1",
+                &.{"workspace 1"},
+            );
+        }
+    };
+    _ = @"focus-workspace";
 }
