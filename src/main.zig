@@ -527,7 +527,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
         .Move_Active_Container_To_Workspace => {
             const workspaces = state.workspaces;
 
-            const workspace_user_name = if (args.next()) |arg| arg else blk: {
+            const workspace_user_name = args.next() orelse blk: {
                 var active_group_workspaces = std.ArrayListUnmanaged(*const Workspace).fromOwnedSlice(try alloc.dupe(*const Workspace, state.workspaces));
                 var group_name_len_max: u64 = 0;
                 var i: u32 = 0;
@@ -1025,6 +1025,40 @@ test "cmd" {
         }
     };
 
+    const @"move-active-container-to-workspace" = struct {
+        test "basic" {
+            try check_do_cmd(
+                &.{
+                    // NOTE: shuffled lines to ensure sort order doesn't matter
+                    "1<-",
+                    "2",
+                },
+                "move-active-container-to-workspace 2",
+                &.{
+                    "move container to workspace 2",
+                },
+            );
+        }
+
+        test "create" {
+            try check_do_cmd(
+                &.{
+                    // NOTE: shuffled lines to ensure sort order doesn't matter
+                    "20001:bar:3",
+                    "30004:baz:4<-",
+                    "1",
+                    "10001:foo:1",
+                    "10002:foo:2",
+                },
+                "move-active-container-to-workspace 2",
+                &.{
+                    "move container to workspace 2:2",
+                },
+            );
+        }
+    };
+
     _ = @"focus-workspace";
     _ = @"switch-active-workspace-group";
+    _ = @"move-active-container-to-workspace";
 }
