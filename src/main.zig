@@ -296,7 +296,7 @@ const Workspace = struct {
     }
 
     // PERF: rewrite
-    pub fn sort_by_logical_num_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
+    pub fn sort_by_group_index_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
         const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
         const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
         if (a_logical != b_logical) {
@@ -308,65 +308,50 @@ const Workspace = struct {
 };
 
 fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
-    // apply fixups for default i3 workspace names
-    // for (state.workspaces, 0..) |workspace, index| {
-    //     const i3_data = workspace.i3 orelse continue;
-    //     const is_default_i3_workspace = workspace.group_name.ptr == GROUP_NAME_DEFAULT.ptr and mem.indexOfScalar(u8, i3_data.name, ':') == null and count_digits(workspace.num) == i3_data.name.len;
-    //     if (is_default_i3_workspace) {
-    //         _ = state.rename_workspace(workspace, index);
-    //     }
-    // }
     switch (args.cmd) {
         .Switch_Active_Workspace_Group => {
             const workspaces = state.workspaces;
-            const group_names = try alloc.dupe([]const u8, state.groups.keys());
-            sort_alphabetically(group_names);
             // TODO: ensure default group is always shown?
-            const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return;
             // TODO: if new_workspace_group_name already exists, don't rename all workspaces
             // TODO: allow entering `group_name:workspace_name` to create new workspace with non number workspace name
-            const new_workspace_group_name = switch (choice) {
-                .new => |name| name,
-                .existing => |index| group_names[index],
-            };
-            // FIXME: is_new should also be true if new_workspace_group_name == "<default>" and no existing workspaces are in default group
-            const is_new = choice == .new;
 
             // ?TODO: consider if focused workspace is also in active workspace group, using it's number
             // TODO: if switching to exisiting group, and not doing current ws number, switch to lowest number in that group
+            const user_group_name = args.next() orelse blk: {
+                const group_names = try alloc.dupe([]const u8, state.groups.keys());
+                sort_alphabetically(group_names);
+                const choice = try Rofi.select_or_new(alloc, "Switch Active Workspace Group", group_names) orelse return error.Aborted;
+                const new_workspace_group_name = switch (choice) {
+                    .new => |name| name,
+                    .existing => |index| group_names[index],
+                };
+                break :blk new_workspace_group_name;
+            };
+            const new_workspace_group_name, const is_new = if (state.groups.getEntry(user_group_name)) |entry|
+                .{ entry.key_ptr.*, false }
+            else
+                .{ user_group_name, true };
             const new_workspace_num = 1;
 
             // FIXME: rename all workspaces here if group not active (or new)
             renaming: {
                 // number of groups based on unique
-                var group_logical_indices = try alloc.alloc(u32, group_names.len);
-                @memset(group_logical_indices, 0);
+                // var group_logical_indices = try alloc.alloc(u32, state.groups.count());
+                // @memset(group_logical_indices, 0);
 
-                var active_group: []const u8 = "";
-                var logical_group_count: u32 = 0; // default 1 for <default> group
+                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_group_index_and_name_less_than);
+
+                var lowest_unused_group_index: u32 = 1;
                 for (workspaces) |workspace| {
-                    const logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                    if (logical_group_index > logical_group_count) {
-                        logical_group_count = logical_group_index;
-                    }
-
-                    const group_name = workspace.group_name;
-                    const group_name_index = group_name_index: for (group_names, 0..) |existing_group_name, index| {
-                        if (mem.eql(u8, existing_group_name, group_name)) break :group_name_index index;
-                    } else unreachable;
-
-                    debug.assert(group_logical_indices[group_name_index] == 0 or group_logical_indices[group_name_index] == logical_group_index);
-                    group_logical_indices[group_name_index] = logical_group_index;
-
-                    if (is_in_active_group(workspace) and active_group.len == 0) {
-                        active_group = group_name;
-                    } else if (is_in_active_group(workspace)) {
-                        // TODO: gracefull handling
-                        debug.assert(mem.eql(u8, group_name, active_group));
+                    const global_group_index = group_index_global(workspace.num);
+                    if (lowest_unused_group_index == global_group_index) {
+                        lowest_unused_group_index = global_group_index + 1;
                     }
                 }
-                logical_group_count += 1;
-                debug.assert(logical_group_count >= group_names.len);
+                const active_group = if (workspaces.len > 0 and is_in_active_group(workspaces[0]))
+                    workspaces[0].group_name
+                else
+                    "";
                 if (SAFETY_CHECKS_ENABLE) {
                     check_active_group_consistency(workspaces, if (active_group.len > 0) active_group else null);
                 }
@@ -375,65 +360,42 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                     break :renaming;
                 }
 
-                // actually inverted (set => not found, unset => found) because api only provides findFirstSet not findFirstUnset
-                var found_logical_group_index_map = try std.DynamicBitSetUnmanaged.initFull(alloc, logical_group_count + 1); // +1 for final always unset bit
-                for (workspaces) |workspace| {
-                    const logical_group_index = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                    found_logical_group_index_map.unset(logical_group_index);
-                }
-
-                //PERF: just check if < pivot logical_group_index+=1 instead of allocating lut
-                var new_logical_group_index_map = try alloc.alloc(u32, logical_group_count);
-                const pivot = found_logical_group_index_map.findFirstSet().?;
-                for (0..pivot) |i| {
-                    new_logical_group_index_map[i] = @intCast(i + 1);
-                }
-
-                for (pivot..logical_group_count) |i| {
-                    new_logical_group_index_map[i] = @intCast(i);
-                }
-
-                // FIXME: handle write or rename failure (easier if writes are batched and we have an intermediate buffer of name mappings)
-                // PERF: batch all rename calls
-                var completed = try std.DynamicBitSet.initEmpty(alloc, workspaces.len);
-
-                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
-
-                // TODO: determine if iterations + retries are still necessary with reverse
                 var idx: usize = workspaces.len;
                 while (idx > 0) : (idx -= 1) {
                     const index = idx - 1;
                     const workspace = workspaces[index];
-                    if (completed.isSet(index)) continue;
 
-                    const num_actual = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
-                    const num_logical_orig = @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                    const is_group_new_active = !is_new and mem.eql(u8, workspace.group_name, new_workspace_group_name);
-                    const num_logical_new = if (is_group_new_active) 0 else new_logical_group_index_map[num_logical_orig];
-                    debug.print(
-                        "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
-                        .{
-                            workspace.i3.?.name,
-                            workspace.name,
-                            num_logical_orig,
-                            num_actual,
-                            num_logical_new,
-                            num_actual,
-                        },
-                    );
+                    const workspace_index_local = group_index_local(workspace.num);
+                    const group_index = group_index_global(workspace.num);
+                    const is_group_new_active = !is_new and workspace.group_name.ptr == new_workspace_group_name.ptr;
+                    const group_index_new = if (is_group_new_active) 0 else if (group_index < lowest_unused_group_index) group_index + 1 else group_index;
+                    if (DEBUG_ENABLE) {
+                        debug.print(
+                            "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
+                            .{
+                                workspace.i3.?.name,
+                                workspace.name,
+                                group_index,
+                                workspace_index_local,
+                                group_index_new,
+                                workspace_index_local,
+                            },
+                        );
+                    }
 
-                    const new_combined_num = (num_logical_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + num_actual;
-                    // TODO: check if workspace rename is even necessary
-                    // PERF: workspace index here
-                    const new_workspace = state.rename_workspace(workspace, null);
-                    new_workspace.num = new_combined_num;
+                    if (group_index_new != group_index) {
+                        const new_combined_num = (group_index_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + workspace_index_local;
+                        // PERF: workspace index here
+                        const new_workspace = state.rename_workspace(workspace, null);
+                        new_workspace.num = new_combined_num;
+                    }
                 }
             }
 
             var buf: std.ArrayList(u8) = .init(alloc);
             try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, buf.writer());
             const new_workspace_name = buf.items;
-            // TODO: if we already know it's new, just create workspace
+            // PERF: if we already know it's new, just create workspace
             const new_workspace = try state.find_or_create_workspace(alloc, new_workspace_group_name, new_workspace_name, new_workspace_num);
             state.switch_to_workspace(new_workspace);
         },
@@ -490,7 +452,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
             const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
 
             const name = if (args.next()) |arg| arg else blk: {
-                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_logical_num_and_name_less_than);
+                mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_group_index_and_name_less_than);
                 var group_name_len_max: u64 = 0;
                 var name_len_max: u64 = 0;
 
@@ -650,6 +612,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
     }
 }
 
+// PERF: batch calls
 fn exec_i3_commands(I3_Impl: anytype, socket: anytype, alloc: Allocator, commands: []State.Cmd) !void {
     // PERF: make i3 exec functions take anytypes, and create a format wrapper for Workspace
     //       so that we avoid allocating here, and instead write direct to io
@@ -702,10 +665,11 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
             debug.print("{s}:\n", .{workspace.output});
             output = workspace.output;
         }
-        debug.print("{s}[{s}]\n", .{ prefix, workspace.name });
+        debug.print("{s}[{s}]\n", .{ prefix, try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace) });
+        debug.print("{s}   name: {s}\n", .{ prefix, workspace.name });
         debug.print("{s}  group: {s}\n", .{ prefix, workspace.group_name });
-        debug.print("{s}  id: {d}\n", .{ prefix, if (workspace.i3) |i3_data| i3_data.id else 0 });
-        debug.print("{s}  num: {d}\n", .{ prefix, workspace.num });
+        debug.print("{s}     id: {d}\n", .{ prefix, if (workspace.i3) |i3_data| i3_data.id else 0 });
+        debug.print("{s}    num: {d}\n", .{ prefix, workspace.num });
     }
 }
 
@@ -860,6 +824,8 @@ fn init_workspace_from_test_name(workspace: *Workspace, test_name: []const u8) b
     return focused;
 }
 
+// TODO: make expected commands be []const u8 with cmd per line,
+// and do single expectEqualStrings call
 fn check_do_cmd(
     workspace_names: []const []const u8,
     args_str: []const u8,
@@ -922,6 +888,9 @@ test file {
 }
 
 test "cmd" {
+    // if (@as(?anyerror, error.SkipZigTest)) |err| {
+    //     return err;
+    // }
     const @"focus-workspace" = struct {
         test "basic" {
             try check_do_cmd(
@@ -974,5 +943,88 @@ test "cmd" {
             );
         }
     };
+    const @"switch-active-workspace-group" = struct {
+        test "basic" {
+            try check_do_cmd(
+                &.{
+                    "1:1<-",
+                    "10001:other:1",
+                },
+                "switch-active-workspace-group other",
+                &.{
+                    "rename workspace 10001:other:1 to 1:other:1",
+                    "rename workspace 1:1 to 10001:1",
+                    "workspace 1:other:1",
+                },
+            );
+        }
+
+        test "from-named-group-to-other-group" {
+            try check_do_cmd(
+                &.{
+                    "1:active:1<-",
+                    "10001:inactive:1",
+                },
+                "switch-active-workspace-group inactive",
+                &.{
+                    "rename workspace 10001:inactive:1 to 1:inactive:1",
+                    "rename workspace 1:active:1 to 10001:active:1",
+                    "workspace 1:inactive:1",
+                },
+            );
+        }
+
+        test "new" {
+            try check_do_cmd(
+                &.{
+                    "1<-",
+                },
+                "switch-active-workspace-group new",
+                &.{
+                    "rename workspace 1 to 10001:1",
+                    "workspace 1:new:1",
+                },
+            );
+        }
+
+        test "new-with-inactives" {
+            try check_do_cmd(
+                &.{
+                    // NOTE: shuffled lines to ensure sort order doesn't matter
+                    "20001:bar:3",
+                    "30004:baz:4",
+                    "1<-",
+                    "10001:foo:1",
+                    "10002:foo:2",
+                },
+                "switch-active-workspace-group new",
+                &.{
+                    "rename workspace 30004:baz:4 to 40004:baz:4",
+                    "rename workspace 20001:bar:3 to 30001:bar:3",
+                    "rename workspace 10002:foo:2 to 20002:foo:2",
+                    "rename workspace 10001:foo:1 to 20001:foo:1",
+                    "rename workspace 1 to 10001:1",
+                    "workspace 1:new:1",
+                },
+            );
+        }
+
+        test "new-with-hole-in-group-indices" {
+            try check_do_cmd(
+                &.{
+                    "1:foo:1<-",
+                    "20001:bar:1",
+                },
+                "switch-active-workspace-group new",
+                &.{
+                    "rename workspace 1:foo:1 to 10001:foo:1",
+                    // NOTE: no rename of 20001:bar:1
+                    "workspace 1:new:1",
+                },
+            );
+        }
+    };
+
     _ = @"focus-workspace";
+    _ = @"switch-active-workspace-group";
 }
