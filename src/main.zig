@@ -290,12 +290,6 @@ const Workspace = struct {
         return mem.lessThan(u8, a.name, b.name);
     }
 
-    pub fn sort_by_group_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        // TODO: consider caching group_names
-        return mem.lessThan(u8, a.get_group_name(), b.get_group_name());
-    }
-
-    // PERF: rewrite
     pub fn sort_by_group_index_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
         const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
         const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
@@ -369,19 +363,6 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                     const group_index = group_index_global(workspace.num);
                     const is_group_new_active = !is_new and workspace.group_name.ptr == new_workspace_group_name.ptr;
                     const group_index_new = if (is_group_new_active) 0 else if (group_index < lowest_unused_group_index) group_index + 1 else group_index;
-                    if (DEBUG_ENABLE) {
-                        debug.print(
-                            "workspace {s} name='{s}' with logical group {d} and actual {d} becomes logical group {d} and actual {d}\n",
-                            .{
-                                workspace.i3.?.name,
-                                workspace.name,
-                                group_index,
-                                workspace_index_local,
-                                group_index_new,
-                                workspace_index_local,
-                            },
-                        );
-                    }
 
                     if (group_index_new != group_index) {
                         const new_combined_num = (group_index_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + workspace_index_local;
@@ -403,7 +384,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
             const workspaces = state.workspaces;
             const active_workspace = state.focused orelse return error.NoFocusedWorkspace;
 
-            const group_name = if (args.next()) |_| return error.TODO_Taking_Name_To_Move_To else blk: {
+            const group_name = args.next() orelse blk: {
                 const group_names = try alloc.dupe([]const u8, state.groups.keys());
                 sort_alphabetically(group_names);
                 const choice = try Rofi.select_or_new(alloc, "Workspace Group", group_names) orelse return;
@@ -619,16 +600,16 @@ fn exec_i3_commands(I3_Impl: anytype, socket: anytype, alloc: Allocator, command
     for (commands) |command| {
         switch (command) {
             .move_container_to_workspace => |workspace| {
-                const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
+                const name = fmt_workspace_name(workspace);
                 try I3_Impl.move_active_container_to_workspace(socket, alloc, name);
             },
             .rename => |data| {
-                const source = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.source);
-                const target = try alloc_print_workspace_name_or_i3_name_if_set(alloc, data.target);
+                const source = fmt_workspace_name(data.source);
+                const target = fmt_workspace_name(data.target);
                 try I3_Impl.rename_workspace(socket, alloc, source, target);
             },
             .set_focused => |workspace| {
-                const name = try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace);
+                const name = fmt_workspace_name(workspace);
                 try I3_Impl.switch_to_workspace(socket, alloc, name);
             },
         }
@@ -665,7 +646,7 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
             debug.print("{s}:\n", .{workspace.output});
             output = workspace.output;
         }
-        debug.print("{s}[{s}]\n", .{ prefix, try alloc_print_workspace_name_or_i3_name_if_set(alloc, workspace) });
+        debug.print("{s}[{s}]\n", .{ prefix, fmt_workspace_name(workspace) });
         debug.print("{s}   name: {s}\n", .{ prefix, workspace.name });
         debug.print("{s}  group: {s}\n", .{ prefix, workspace.group_name });
         debug.print("{s}     id: {d}\n", .{ prefix, if (workspace.i3) |i3_data| i3_data.id else 0 });
@@ -673,44 +654,27 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
     }
 }
 
-fn alloc_print_workspace_name_or_i3_name_if_set(alloc: Allocator, workspace: *const Workspace) ![]const u8 {
-    if (workspace.i3) |i3_data| {
-        return i3_data.name;
-    }
-    return alloc_print_workspace_name(alloc, workspace);
+fn fmt_workspace_name(workspace: *const Workspace) WorkspaceNameFormat {
+    return .{ .workspace = workspace };
 }
 
-fn alloc_print_workspace_name(alloc: Allocator, workspace: *const Workspace) ![]const u8 {
-    const group_name = workspace.group_name;
-    const num = workspace.num;
-    const name = workspace.name;
-    const buf = try alloc.alloc(u8, workspace_name_parts_len(num, group_name, name));
-    var buf_stream = std.io.fixedBufferStream(buf);
-    try write_workspace_name_parts(buf_stream.writer(), num, group_name, name);
-    return buf;
-}
+const WorkspaceNameFormat = struct {
+    workspace: *const Workspace,
 
-fn write_workspace_name_parts(writer: anytype, num: u32, group_name: []const u8, name: []const u8) !void {
-    try std.fmt.formatInt(num, 10, .lower, .{}, writer);
-    try writer.writeByte(':');
-    if (group_name.len > 0 and !mem.eql(u8, group_name, "<default>")) {
-        try writer.writeAll(group_name);
+    pub fn format(this: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (this.workspace.i3) |i3_data| {
+            try writer.writeAll(i3_data.name);
+            return;
+        }
+        try std.fmt.formatInt(this.workspace.num, 10, .lower, .{}, writer);
         try writer.writeByte(':');
+        if (this.workspace.group_name.len > 0 and !mem.eql(u8, this.workspace.group_name, GROUP_NAME_DEFAULT)) {
+            try writer.writeAll(this.workspace.group_name);
+            try writer.writeByte(':');
+        }
+        try writer.writeAll(this.workspace.name);
     }
-    try writer.writeAll(name);
-}
-
-fn workspace_name_parts_len(num: u32, group_name: []const u8, name: []const u8) u32 {
-    var len: u64 = 0;
-    len += count_digits(num);
-    len += ":".len;
-    if (group_name.len > 0 and !mem.eql(u8, group_name, "<default>")) {
-        len += group_name.len;
-        len += ":".len;
-    }
-    len += name.len;
-    return @intCast(len);
-}
+};
 
 fn sort_alphabetically(strings: [][]const u8) void {
     const cmp = struct {
@@ -771,36 +735,6 @@ fn parse_workspace_name_num(workspace_name: []const u8) ?u32 {
         name = name[colon_pos + 1 ..];
     }
     return std.fmt.parseInt(u32, name, 10) catch null;
-}
-
-fn split_N_times(comptime T: type, buf: []const T, needle: T, comptime N: comptime_int) [N][]const T {
-    var elems: [N][]const T = undefined;
-    var iter = mem.tokenizeScalar(T, buf, needle);
-    inline for (0..N) |i| {
-        elems[i] = iter.next() orelse debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
-    }
-    if (iter.next()) |_| {
-        debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
-    }
-    return elems;
-}
-
-fn split_N_times_seq(comptime T: type, buf: []const T, needle: []const T, comptime N: comptime_int) [N][]const T {
-    var elems: [N][]const T = undefined;
-    var iter = mem.tokenizeSequence(T, buf, needle);
-    inline for (0..N) |i| {
-        elems[i] = iter.next() orelse debug.panic("Not Enough Segments in Buf. Failed to split N ({}) times", .{N});
-    }
-    if (iter.next()) |_| {
-        debug.panic("Too Many Segments in Buf. Failed to split N ({}) times", .{N});
-    }
-    return elems;
-}
-
-fn strip_prefix_exact(comptime T: type, buf: []const T, prefix: []const T) []const T {
-    debug.assert(buf.len > prefix.len);
-    debug.assert(mem.eql(T, buf[0..prefix.len], prefix));
-    return buf[prefix.len..];
 }
 
 fn count_digits(num: anytype) usize {

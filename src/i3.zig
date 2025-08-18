@@ -10,22 +10,6 @@ pub fn connect(alloc: Allocator) !net.Stream {
     return socket;
 }
 
-const Version = struct {
-    major: u32,
-    minor: u32,
-    patch: u32,
-};
-
-fn get_version(socket: net.Stream, alloc: Allocator) !Version {
-    try exec_command(socket, .GET_VERSION, "");
-    const response_full = try read_reply(socket, alloc, .VERSION);
-    const version = try std.json.parseFromSlice(Version, alloc, response_full, .{
-        .ignore_unknown_fields = true,
-    });
-    defer version.deinit();
-    return version.value;
-}
-
 pub const Workspace = struct {
     id: i64,
     name: []const u8,
@@ -64,47 +48,46 @@ pub fn get_workspaces(socket: net.Stream, alloc: Allocator) ![]Workspace {
     const response = try std.json.parseFromSlice([]Workspace, alloc, response_full, .{
         .ignore_unknown_fields = true,
     });
-    // debug.print("{s}\n", .{response_full});
     return response.value;
 }
 
-pub fn rename_workspace(socket: net.Stream, alloc: Allocator, name: []const u8, to_name: []const u8) !void {
-    try write_rename_workspace(socket.writer().any(), name, to_name);
+pub fn rename_workspace(socket: net.Stream, alloc: Allocator, source: anytype, target: anytype) !void {
+    try write_rename_workspace(socket.writer().any(), source, target);
     try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 }
 
-pub fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
+pub fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: anytype) !void {
     try write_switch_to_workspace(socket.writer().any(), name);
     try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 }
 
-pub fn move_active_container_to_workspace(socket: net.Stream, alloc: Allocator, name: []const u8) !void {
+pub fn move_active_container_to_workspace(socket: net.Stream, alloc: Allocator, name: anytype) !void {
     try write_move_active_container_to_workspace(socket.writer().any(), name);
     try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
 }
 
-fn write_rename_workspace(writer: std.io.AnyWriter, source: []const u8, target: []const u8) !void {
+fn write_rename_workspace(writer: std.io.AnyWriter, source: anytype, target: anytype) !void {
     try exec_command_print(writer, .RUN_COMMAND, "rename workspace {s} to {s}", .{ source, target });
 }
 
-fn write_move_active_container_to_workspace(writer: std.io.AnyWriter, name: []const u8) !void {
+fn write_move_active_container_to_workspace(writer: std.io.AnyWriter, name: anytype) !void {
     try exec_command_print(writer, .RUN_COMMAND, "move container to workspace {s}", .{name});
 }
 
-fn write_switch_to_workspace(writer: std.io.AnyWriter, name: []const u8) !void {
+fn write_switch_to_workspace(writer: std.io.AnyWriter, name: anytype) !void {
     try exec_command_print(writer, .RUN_COMMAND, "workspace {s}", .{name});
 }
 
 pub const Mock = struct {
-    pub fn rename_workspace(writer: std.io.AnyWriter, _: Allocator, name: []const u8, to_name: []const u8) !void {
-        try write_rename_workspace(writer, name, to_name);
+    pub fn rename_workspace(writer: std.io.AnyWriter, _: Allocator, source: anytype, target: anytype) !void {
+        try write_rename_workspace(writer, source, target);
     }
 
-    pub fn switch_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: []const u8) !void {
+    pub fn switch_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: anytype) !void {
         try write_switch_to_workspace(writer, name);
     }
 
-    pub fn move_active_container_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: []const u8) !void {
+    pub fn move_active_container_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: anytype) !void {
         try write_move_active_container_to_workspace(writer, name);
     }
 };
