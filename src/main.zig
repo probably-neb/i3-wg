@@ -384,29 +384,29 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
             const workspaces = state.workspaces;
             const active_workspace = state.focused orelse return error.NoFocusedWorkspace;
 
-            const group_name = args.next() orelse blk: {
+            const user_group_name = args.next() orelse blk: {
                 const group_names = try alloc.dupe([]const u8, state.groups.keys());
                 sort_alphabetically(group_names);
                 const choice = try Rofi.select_or_new(alloc, "Workspace Group", group_names) orelse return;
-                switch (choice) {
-                    .new => |_| return error.TODO_Allow_New_Group,
-                    .existing => |group_name_idx| break :blk group_names[group_name_idx],
-                }
+                break :blk switch (choice) {
+                    .new => |group_name| group_name,
+                    .existing => |group_name_idx| group_names[group_name_idx],
+                };
             };
 
-            const group_logical_num = blk: for (workspaces) |workspace| {
-                if (mem.eql(u8, workspace.group_name, group_name)) {
-                    break :blk @divTrunc(workspace.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-                }
-            } else unreachable;
+            const group_name = (try state.groups.getOrPut(alloc, user_group_name)).key_ptr.*;
 
-            const active_workspace_actual_num = active_workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
+            var group_logical_num_max: u32 = 0;
+            const group_logical_num = blk: for (workspaces) |workspace| {
+                const global_num = group_index_global(workspace.num);
+                group_logical_num_max = @max(group_logical_num_max, global_num);
+                if (workspace.group_name.ptr == group_name.ptr) {
+                    break :blk global_num;
+                }
+            } else group_logical_num_max + 1;
 
             const workspace_with_num_exists = blk: for (workspaces) |workspace| {
-                const workspace_actual_num = workspace.num % INACTIVE_WORKSPACE_GROUP_FACTOR;
-                const is_actual_num_same = workspace_actual_num == active_workspace_actual_num;
-                const is_group_name_same = std.mem.eql(u8, workspace.group_name, group_name);
-                if (is_actual_num_same and is_group_name_same) {
+                if (workspace.group_name.ptr == group_name.ptr and group_index_local(active_workspace.num) == group_index_local(workspace.num)) {
                     break :blk true;
                 }
             } else false;
@@ -415,7 +415,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 return error.TODO_Copying_Over_Containers;
             }
 
-            const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + active_workspace_actual_num;
+            const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + group_index_local(active_workspace.num);
 
             // PERF: workspace index
             const new_workspace = state.rename_workspace(active_workspace, null);
@@ -430,7 +430,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
             // TODO: is no active workspace group actually an error here?
             // FIXME: how to handle no active group and no group name...
-            const active_workspace_group = get_active_workspace_group(workspaces) orelse return error.NoActiveGroup;
+            const active_workspace_group = get_active_workspace_group(state) orelse return error.NoActiveGroup;
 
             const name = if (args.next()) |arg| arg else blk: {
                 mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_group_index_and_name_less_than);
@@ -538,7 +538,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 break :blk choice;
             };
 
-            const active_workspace_group = get_active_workspace_group(workspaces);
+            const active_workspace_group = get_active_workspace_group(state);
 
             var workspace_name = workspace_user_name;
             var workspace_group_name = active_workspace_group orelse "<default>";
@@ -686,16 +686,19 @@ fn sort_alphabetically(strings: [][]const u8) void {
     mem.sort([]const u8, strings, {}, cmp.less_than);
 }
 
-fn get_active_workspace_group(workspaces: []*const Workspace) ?[]const u8 {
+fn get_active_workspace_group(state: *State) ?[]const u8 {
     var active_workspace_group: ?[]const u8 = null;
-    for (workspaces) |workspace| {
+    for (state.workspaces) |workspace| {
         if (is_in_active_group(workspace)) {
             active_workspace_group = workspace.group_name;
             break;
         }
     }
+    if (active_workspace_group == null and state.focused != null) {
+        active_workspace_group = state.focused.?.group_name;
+    }
     if (SAFETY_CHECKS_ENABLE) {
-        check_active_group_consistency(workspaces, active_workspace_group);
+        check_active_group_consistency(state.workspaces, active_workspace_group);
     }
 
     return active_workspace_group;
@@ -992,7 +995,25 @@ test "cmd" {
         }
     };
 
+    const @"assign-workspace-to-group" = struct {
+        test "create" {
+            try check_do_cmd(
+                &.{
+                    "1",
+                    "2",
+                    "10001:foo:1",
+                    "10002:foo:2<-",
+                },
+                "assign-workspace-to-group bar",
+                &.{
+                    "rename workspace 10002:foo:2 to 20002:bar:2",
+                },
+            );
+        }
+    };
+
     _ = @"focus-workspace";
     _ = @"switch-active-workspace-group";
     _ = @"move-active-container-to-workspace";
+    _ = @"assign-workspace-to-group";
 }

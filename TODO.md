@@ -10,8 +10,7 @@
 - [ ] Write tests for do_cmd with constructed args
     - [ ] String representation -> State
     - [ ] Compare string representation of cmd buf to expected output
-- [ ] Clean
-    - [ ] Have groups be [GROUPS_MAX]group_name and indexed by global index
+- [ ] Have groups logical index stored in groups map
 
 ## Additional Commands
 
@@ -23,6 +22,8 @@
 
 ## Issues
 - [ ] Fix handling of workspaces with no num like `foo:baz`
+- [ ] If moving to group from inactive workspace, make sure active workspace is preserved
+- [ ] If no active workspace, should apply fixup to set currently focused workspace as active
 - [ ] Identify required "fixups"
     - [ ] Items with no group -> Default
     - [ ] Conflicting group logical indices
