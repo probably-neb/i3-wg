@@ -6,6 +6,7 @@ const Allocator = mem.Allocator;
 
 pub fn connect(alloc: Allocator) !net.Stream {
     const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
+    defer alloc.free(socket_path);
     const socket = try net.connectUnixSocket(socket_path);
     return socket;
 }

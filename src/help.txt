@@ -1,0 +1,24 @@
+i3-wg - i3 Workspace Groups Manager
+
+USAGE: i3-wg <COMMAND> [ARGS]
+
+COMMANDS:
+  help                                      Print this help menu
+  switch-active-workspace-group [GROUP]     Switch to a different workspace group
+  assign-workspace-to-group [GROUP]         Move current workspace to another group
+  rename-workspace                          (NOT IMPLEMENTED)
+  focus-workspace [NAME|NUM]                Switch to workspace in active group
+  move-active-container-to-workspace [WS]   Move focused window to workspace
+  dbg-pretty-list-workspaces                List all workspaces with details
+
+ARGUMENTS:
+  All arguments are optional. If omitted, a Rofi dialog will appear for selection.
+  Workspace arguments may be of the form: "name", "number", or "group:name"
+
+EXAMPLES:
+  i3-wg switch-active-workspace-group work     # Switch to "work" group
+  i3-wg focus-workspace 3                      # Focus workspace 3 in current group
+  i3-wg move-active-container-to-workspace dev:code  # Move window to "code" in "dev" group
+
+NOTES:
+  - Requires I3SOCK environment variable

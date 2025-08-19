@@ -41,8 +41,8 @@ pub fn main() !void {
     const alloc = arena_alloc.allocator();
 
     var args = Args.from_process_args(alloc) orelse {
-        // TODO: implement help
-        return error.Help_Not_Implemented;
+        try std.io.getStdOut().writeAll(@embedFile("./help.txt"));
+        std.process.exit(0);
     };
 
     const socket = try I3.connect(alloc);
