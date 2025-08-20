@@ -249,37 +249,11 @@ const Workspace = struct {
 
     fn init_in_place_from_name(this: *Workspace, name: []const u8) void {
         this.* = .zero;
-        const count_colons = blk: {
-            var count: u32 = 0;
-            for (name) |c| {
-                count += @intFromBool(c == ':');
-            }
-            break :blk count;
-        };
-        var possible_num = name;
-        switch (count_colons) {
-            0 => {
-                this.group_name = "<default>";
-                this.name = name;
-                possible_num = name;
-            },
-            1 => {
-                const part = mem.lastIndexOfScalar(u8, name, ':').?;
-                this.group_name = GROUP_NAME_DEFAULT;
-                this.name = name[part + 1 ..];
-                possible_num = name[part + 1 ..];
-            },
-            else => {
-                const part_a = mem.indexOfScalar(u8, name, ':').?;
-                const part_b = mem.indexOfScalarPos(u8, name, part_a + 1, ':').?;
-                possible_num = name[0..part_a];
-                this.group_name = name[part_a + 1 .. part_b];
-                this.name = name[part_b + 1 ..];
-            },
-        }
-        if (std.fmt.parseInt(u32, possible_num, 10) catch null) |num| {
-            this.num = num;
-        }
+        const info = parse_workspace_name(name);
+        this.group_name = info.group_name;
+        this.name = info.name;
+        // FIXME: How to handle?
+        this.num = info.num orelse 0;
     }
 
     pub fn sort_by_output_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
@@ -291,10 +265,10 @@ const Workspace = struct {
     }
 
     pub fn sort_by_group_index_and_name_less_than(_: void, a: *const Workspace, b: *const Workspace) bool {
-        const a_logical = @divTrunc(a.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-        const b_logical = @divTrunc(b.num, INACTIVE_WORKSPACE_GROUP_FACTOR);
-        if (a_logical != b_logical) {
-            return a_logical < b_logical;
+        const a_group = group_index_global(a.num);
+        const b_group = group_index_global(b.num);
+        if (a_group != b_group) {
+            return a_group < b_group;
         }
 
         return mem.lessThan(u8, a.name, b.name);
@@ -359,17 +333,21 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                     const index = idx - 1;
                     const workspace = workspaces[index];
 
-                    const workspace_index_local = group_index_local(workspace.num);
                     const group_index = group_index_global(workspace.num);
                     const is_group_new_active = !is_new and workspace.group_name.ptr == new_workspace_group_name.ptr;
-                    const group_index_new = if (is_group_new_active) 0 else if (group_index < lowest_unused_group_index) group_index + 1 else group_index;
+                    const group_index_new = if (is_group_new_active)
+                        0
+                    else if (group_index < lowest_unused_group_index)
+                        group_index + 1
+                    else
+                        group_index;
 
-                    if (group_index_new != group_index) {
-                        const new_combined_num = (group_index_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + workspace_index_local;
-                        // PERF: workspace index here
-                        const new_workspace = state.rename_workspace(workspace, null);
-                        new_workspace.num = new_combined_num;
-                    }
+                    if (group_index_new == group_index) continue;
+
+                    const new_combined_num = (group_index_new * INACTIVE_WORKSPACE_GROUP_FACTOR) + group_index_local(workspace.num);
+                    // PERF: workspace index here
+                    const new_workspace = state.rename_workspace(workspace, null);
+                    new_workspace.num = new_combined_num;
                 }
             }
 
@@ -541,7 +519,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
             const active_workspace_group = get_active_workspace_group(state);
 
             var workspace_name = workspace_user_name;
-            var workspace_group_name = active_workspace_group orelse "<default>";
+            var workspace_group_name = active_workspace_group orelse GROUP_NAME_DEFAULT;
             var workspace_logical_group_index: u32 = 0;
             var workspace_num = blk: for (workspaces) |workspace| {
                 if (workspace == state.focused) {
@@ -570,7 +548,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 }
             }
 
-            if (parse_workspace_name_num(workspace_name)) |num| {
+            if (parse_workspace_name(workspace_name).num) |num| {
                 workspace_num = num;
             }
 
@@ -732,12 +710,49 @@ fn is_in_active_group(workspace: *const Workspace) bool {
     return workspace.num < INACTIVE_WORKSPACE_GROUP_FACTOR;
 }
 
-fn parse_workspace_name_num(workspace_name: []const u8) ?u32 {
-    var name = workspace_name;
-    if (mem.lastIndexOfScalar(u8, name, ':')) |colon_pos| {
-        name = name[colon_pos + 1 ..];
+const NameInfo = struct { num: ?u32, group_name: []const u8, name: []const u8 };
+
+fn try_parse_num(possible_num: []const u8) ?u32 {
+    return std.fmt.parseInt(u32, mem.trim(u8, possible_num, &std.ascii.whitespace), 10) catch null;
+}
+
+fn parse_workspace_name(name: []const u8) NameInfo {
+    var info: NameInfo = .{ .num = null, .group_name = "", .name = "" };
+    const count_colons = blk: {
+        var count: u32 = 0;
+        for (name) |c| {
+            count += @intFromBool(c == ':');
+        }
+        break :blk count;
+    };
+    switch (count_colons) {
+        0 => {
+            info.group_name = GROUP_NAME_DEFAULT;
+            info.name = name;
+            info.num = try_parse_num(name);
+        },
+        1 => {
+            const part = mem.lastIndexOfScalar(u8, name, ':').?;
+            info.name = name[part + 1 ..];
+            if (try_parse_num(name[0..part])) |num| {
+                info.num = num;
+                info.group_name = GROUP_NAME_DEFAULT;
+            } else {
+                info.num = try_parse_num(name[part + 1 ..]);
+                info.group_name = name[0..part];
+            }
+        },
+        else => {
+            const part_a = mem.indexOfScalar(u8, name, ':').?;
+            const part_b = mem.indexOfScalarPos(u8, name, part_a + 1, ':').?;
+            info.num = try_parse_num(name[0..part_a]);
+            info.group_name = name[part_a + 1 .. part_b];
+            info.name = name[part_b + 1 ..];
+        },
     }
-    return std.fmt.parseInt(u32, name, 10) catch null;
+    info.name = mem.trim(u8, info.name, &std.ascii.whitespace);
+    info.group_name = mem.trim(u8, info.group_name, &std.ascii.whitespace);
+    return info;
 }
 
 fn count_digits(num: anytype) usize {
@@ -817,6 +832,32 @@ test count_digits {
     try std.testing.expectEqual(3, count_digits(100));
     try std.testing.expectEqual(3, count_digits(999));
     try std.testing.expectEqual(4, count_digits(-1000));
+}
+
+test parse_workspace_name {
+    const cases: []const struct { []const u8, NameInfo } = &.{
+        .{ "2:2", .{ .name = "2", .num = 2, .group_name = GROUP_NAME_DEFAULT } },
+        .{ "10002:foo:3", .{ .name = "3", .num = 10002, .group_name = "foo" } },
+        .{ "foo:bar", .{ .name = "bar", .num = null, .group_name = "foo" } },
+        .{ "foo:1", .{ .name = "1", .num = 1, .group_name = "foo" } },
+    };
+
+    for (cases) |case| {
+        const name, const expected = case;
+        const actual = parse_workspace_name(name);
+        std.testing.expectEqualStrings(expected.group_name, actual.group_name) catch |err| {
+            debug.print("Group name incorrect for workspace {s}\n", .{name});
+            return err;
+        };
+        std.testing.expectEqualStrings(expected.name, actual.name) catch |err| {
+            debug.print("Workspace name incorrect for workspace {s}\n", .{name});
+            return err;
+        };
+        std.testing.expectEqual(expected.num, actual.num) catch |err| {
+            debug.print("Num incorrect for workspace {s}\n", .{name});
+            return err;
+        };
+    }
 }
 
 const file = @This();
