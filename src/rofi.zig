@@ -33,7 +33,7 @@ pub fn select(alloc: Allocator, label: []const u8, items: [][]const u8) !?u32 {
 
 const SelectWriterIntermediate = struct {
     child: std.process.Child,
-    writer: std.fs.File.Writer,
+    writer: std.Io.Writer,
     alloc: mem.Allocator,
 
     pub fn finish(self: *SelectWriterIntermediate) !?[]const u8 {
@@ -65,7 +65,9 @@ pub fn select_or_new_writer(alloc: Allocator, label: []const u8) !SelectWriterIn
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     try child.spawn();
-    return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
+    var stdin = child.stdin.?;
+    const writer = stdin.writer(&.{}).interface;
+    return .{ .child = child, .writer = writer, .alloc = alloc };
 }
 
 pub fn select_or_new(alloc: Allocator, label: []const u8, items: [][]const u8) !?union(enum) { existing: u32, new: []const u8 } {

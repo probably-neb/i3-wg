@@ -3,6 +3,8 @@ const net = std.net;
 const mem = std.mem;
 const debug = std.debug;
 const Allocator = mem.Allocator;
+const Io = std.Io;
+const is_test = @import("builtin").is_test;
 
 pub fn connect(alloc: Allocator) !net.Stream {
     const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
@@ -43,55 +45,26 @@ pub const Workspace = struct {
     }
 };
 
-pub fn get_workspaces(socket: net.Stream, alloc: Allocator) ![]Workspace {
-    try exec_command(socket, .GET_WORKSPACES, "");
-    const response_full = try read_reply(socket, alloc, .WORKSPACES);
+pub fn get_workspaces(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator) ![]Workspace {
+    try exec_command(writer, .GET_WORKSPACES, "");
+    const response_full = try read_reply(reader, alloc, .WORKSPACES);
     const response = try std.json.parseFromSlice([]Workspace, alloc, response_full, .{
         .ignore_unknown_fields = true,
     });
     return response.value;
 }
 
-pub fn rename_workspace(socket: net.Stream, alloc: Allocator, source: anytype, target: anytype) !void {
-    try write_rename_workspace(socket.writer().any(), source, target);
-    try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+pub fn rename_workspace(socket: *Io.Writer, source: anytype, target: anytype) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "rename workspace {f} to {f}", .{ source, target });
 }
 
-pub fn switch_to_workspace(socket: net.Stream, alloc: Allocator, name: anytype) !void {
-    try write_switch_to_workspace(socket.writer().any(), name);
-    try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+pub fn switch_to_workspace(socket: *Io.Writer, name: anytype) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "workspace {f}", .{name});
 }
 
-pub fn move_active_container_to_workspace(socket: net.Stream, alloc: Allocator, name: anytype) !void {
-    try write_move_active_container_to_workspace(socket.writer().any(), name);
-    try read_reply_expect_single_success_true(socket, alloc, .COMMAND);
+pub fn move_active_container_to_workspace(socket: *Io.Writer, name: anytype) !void {
+    try exec_command_print(socket, .RUN_COMMAND, "move container to workspace {f}", .{name});
 }
-
-fn write_rename_workspace(writer: std.io.AnyWriter, source: anytype, target: anytype) !void {
-    try exec_command_print(writer, .RUN_COMMAND, "rename workspace {s} to {s}", .{ source, target });
-}
-
-fn write_move_active_container_to_workspace(writer: std.io.AnyWriter, name: anytype) !void {
-    try exec_command_print(writer, .RUN_COMMAND, "move container to workspace {s}", .{name});
-}
-
-fn write_switch_to_workspace(writer: std.io.AnyWriter, name: anytype) !void {
-    try exec_command_print(writer, .RUN_COMMAND, "workspace {s}", .{name});
-}
-
-pub const Mock = struct {
-    pub fn rename_workspace(writer: std.io.AnyWriter, _: Allocator, source: anytype, target: anytype) !void {
-        try write_rename_workspace(writer, source, target);
-    }
-
-    pub fn switch_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: anytype) !void {
-        try write_switch_to_workspace(writer, name);
-    }
-
-    pub fn move_active_container_to_workspace(writer: std.io.AnyWriter, _: Allocator, name: anytype) !void {
-        try write_move_active_container_to_workspace(writer, name);
-    }
-};
 
 pub const Command = enum(i32) {
     RUN_COMMAND = 0,
@@ -127,28 +100,28 @@ pub const Reply = enum(i32) {
 
 const MAGIC_STRING = "i3-ipc";
 
-pub fn exec_command(socket: net.Stream, command: Command, msg: []const u8) !void {
+pub fn exec_command(socket: *Io.Writer, command: Command, msg: []const u8) !void {
     try socket.writeAll(MAGIC_STRING);
     try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg.len))));
     try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
     try socket.writeAll(msg);
 }
 
-pub fn exec_command_len(socket: std.io.AnyWriter, command: Command, msg_len: u32) !void {
+pub fn exec_command_len(socket: *Io.Writer, command: Command, msg_len: u32) !void {
     try socket.writeAll(MAGIC_STRING);
     try socket.writeAll(&mem.toBytes(@as(i32, @intCast(msg_len))));
     try socket.writeAll(&mem.toBytes(@as(i32, @intFromEnum(command))));
 }
 
-pub fn exec_command_print(socket: std.io.AnyWriter, command: Command, comptime msg: []const u8, args: anytype) !void {
+pub fn exec_command_print(socket: *Io.Writer, command: Command, comptime msg: []const u8, args: anytype) !void {
     try exec_command_len(socket, command, @intCast(std.fmt.count(msg, args)));
     try socket.print(msg, args);
 }
 
-pub fn read_msg_header(socket: anytype) !usize {
+pub fn read_msg_header(socket: *Io.Reader) !usize {
     {
         var magic_buffer: [MAGIC_STRING.len]u8 = undefined;
-        const magic_read_count = try socket.readAtLeast(&magic_buffer, MAGIC_STRING.len);
+        const magic_read_count = try socket.readSliceShort(&magic_buffer);
         if (magic_read_count != MAGIC_STRING.len or !mem.eql(u8, MAGIC_STRING, &magic_buffer)) {
             return error.InvalidMagic;
         }
@@ -156,7 +129,7 @@ pub fn read_msg_header(socket: anytype) !usize {
 
     const message_length = blk: {
         var length_buffer: [4]u8 = undefined;
-        const length_read_count = try socket.readAtLeast(&length_buffer, 4);
+        const length_read_count = try socket.readSliceShort(&length_buffer);
         if (length_read_count != 4) {
             return error.InvalidLength;
         }
@@ -169,10 +142,10 @@ pub fn read_msg_header(socket: anytype) !usize {
     return message_length;
 }
 
-pub fn read_msg_kind(comptime Msg: type, socket: anytype) !Msg {
+pub fn read_msg_kind(comptime Msg: type, socket: *Io.Reader) !Msg {
     var type_buffer: [4]u8 = undefined;
-    const type_read_count = try socket.readAtLeast(&type_buffer, 4);
-    if (type_read_count != 4) {
+    const type_read_count = try socket.readSliceShort(&type_buffer);
+    if (type_read_count != type_buffer.len) {
         return error.InvalidType;
     }
     const type_val = @as(i32, @bitCast(type_buffer));
@@ -180,7 +153,7 @@ pub fn read_msg_kind(comptime Msg: type, socket: anytype) !Msg {
     return reply;
 }
 
-pub fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
+pub fn read_reply(socket: *Io.Reader, alloc: mem.Allocator, expected_reply: Reply) ![]const u8 {
     // PERF: make initial buf with [I3_MAGIC_STRING.len + 4 + 4]u8 to cut number of read calls
     const message_length = try read_msg_header(socket);
 
@@ -188,15 +161,14 @@ pub fn read_reply(socket: net.Stream, alloc: mem.Allocator, expected_reply: Repl
     if (reply != expected_reply) {
         return error.UnexpectedReplyType;
     }
-    const message_buffer = try alloc.alloc(u8, message_length);
-    const msg_read_count = try socket.readAtLeast(message_buffer, message_length);
-    if (msg_read_count != message_length) {
+    const message_buffer = try socket.readAlloc(alloc, message_length);
+    if (message_buffer.len != message_length) {
         return error.InsufficientMessageLength;
     }
     return message_buffer;
 }
 
-pub fn read_reply_expect_single_success_true(socket: net.Stream, alloc: mem.Allocator, expected_reply: Reply) !void {
+pub fn read_reply_expect_single_success_true(socket: *Io.Reader, alloc: mem.Allocator, expected_reply: Reply) !void {
     const expected_response = "[{\"success\":true}]";
     const expected_response_2 = "[{\"success\": true}]";
     var buf_alloc = std.heap.stackFallback(expected_response_2.len + 1, alloc);

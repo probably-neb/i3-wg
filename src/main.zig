@@ -4,6 +4,7 @@ const mem = std.mem;
 const debug = std.debug;
 const ArrayList = std.ArrayList;
 const Allocator = mem.Allocator;
+const Io = std.Io;
 
 const I3 = @import("i3.zig");
 const Rofi = @import("rofi.zig");
@@ -41,19 +42,33 @@ pub fn main() !void {
     const alloc = arena_alloc.allocator();
 
     var args = Args.from_process_args(alloc) orelse {
-        try std.io.getStdOut().writeAll(@embedFile("./help.txt"));
+        var buf: [1024]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&buf);
+        const stdout = &stdout_writer.interface;
+        try stdout.writeAll(@embedFile("./help.txt"));
         std.process.exit(0);
     };
 
     const socket = try I3.connect(alloc);
     defer socket.close();
+    var socket_buf: [1024]u8 = undefined;
+    var socket_writer = socket.writer(&socket_buf).interface;
+    var socket_buf_2: [1024]u8 = undefined;
+    var socket_reader_impl = socket.reader(&socket_buf_2);
+    const socket_reader = socket_reader_impl.interface();
 
-    const i3_workspaces = try I3.get_workspaces(socket, alloc);
+    // TODO:
+    // WIP: Updating to zig 0.15.1
+    // - Finish converting I3 and compiling
+    // - Try compiling with tests
+    // - Make I3.Socket that is {reader, writer} pair
+    // - Flush!
+    const i3_workspaces = try I3.get_workspaces(&socket_writer, socket_reader, alloc);
 
     var state = try alloc.create(State);
     try state.init_in_place_with_workspace_init(I3.Workspace, alloc, i3_workspaces, Workspace.init_in_place_from_i3);
     try do_cmd(state, &args, alloc);
-    try exec_i3_commands(I3, socket, alloc, state.commands[0..state.commands_count]);
+    try exec_i3_commands(&socket_writer, socket_reader, alloc, state.commands[0..state.commands_count]);
 }
 
 const Args = struct {
@@ -75,9 +90,9 @@ const Args = struct {
     fn from_iter(alloc: Allocator, args_iter: anytype) ?Args {
         const cmd_str = args_iter.next() orelse return null;
         const cmd = Cli_Command.Map.get(cmd_str) orelse return null;
-        var positionals: ArrayList([]const u8) = .init(alloc);
+        var positionals: ArrayList([]const u8) = .empty;
         while (args_iter.next()) |positional| {
-            positionals.append(positional) catch return null;
+            positionals.append(alloc, positional) catch return null;
         }
 
         return .{
@@ -351,9 +366,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 }
             }
 
-            var buf: std.ArrayList(u8) = .init(alloc);
-            try std.fmt.formatInt(new_workspace_num, 10, .lower, .{}, buf.writer());
-            const new_workspace_name = buf.items;
+            const new_workspace_name = try std.fmt.allocPrint(alloc, "{d}", .{new_workspace_num});
             // PERF: if we already know it's new, just create workspace
             const new_workspace = try state.find_or_create_workspace(alloc, new_workspace_group_name, new_workspace_name, new_workspace_num);
             state.switch_to_workspace(new_workspace);
@@ -422,14 +435,16 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
                 var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
+                var writer = selection.writer;
 
                 for (workspaces) |workspace| {
-                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| workspace.group_name.len);
-                    try selection.writer.writeAll(workspace.group_name);
-                    try selection.writer.writeByteNTimes(' ', name_len_max -| workspace.name.len + 2);
-                    try selection.writer.writeAll(workspace.name);
-                    try selection.writer.writeByte('\n');
+                    _ = try writer.splatByte(' ', group_name_len_max -| workspace.group_name.len);
+                    try writer.writeAll(workspace.group_name);
+                    _ = try writer.splatByte(' ', name_len_max -| workspace.name.len + 2);
+                    try writer.writeAll(workspace.name);
+                    try writer.writeByte('\n');
                 }
+                try writer.flush();
                 const maybe_choice = try selection.finish();
                 if (maybe_choice == null) return;
                 const choice = maybe_choice.?;
@@ -503,14 +518,16 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
                 var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
+                var writer = selection.writer;
 
                 for (active_group_workspaces.items) |workspace| {
-                    try selection.writer.writeByteNTimes(' ', group_name_len_max -| workspace.group_name.len);
-                    try selection.writer.writeAll(workspace.group_name);
-                    try selection.writer.writeByte(':');
-                    try selection.writer.writeAll(workspace.name);
-                    try selection.writer.writeByte('\n');
+                    _ = try writer.splatByte(' ', group_name_len_max -| workspace.group_name.len);
+                    try writer.writeAll(workspace.group_name);
+                    try writer.writeByte(':');
+                    try writer.writeAll(workspace.name);
+                    try writer.writeByte('\n');
                 }
+                try writer.flush();
                 const choice = try selection.finish() orelse return;
                 debug.print("selection: {s}\n", .{choice});
                 break :blk choice;
@@ -572,24 +589,27 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 }
 
 // PERF: batch calls
-fn exec_i3_commands(I3_Impl: anytype, socket: anytype, alloc: Allocator, commands: []State.Cmd) !void {
+fn exec_i3_commands(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator, commands: []State.Cmd) !void {
     // PERF: make i3 exec functions take anytypes, and create a format wrapper for Workspace
     //       so that we avoid allocating here, and instead write direct to io
     for (commands) |command| {
         switch (command) {
             .move_container_to_workspace => |workspace| {
                 const name = fmt_workspace_name(workspace);
-                try I3_Impl.move_active_container_to_workspace(socket, alloc, name);
+                try I3.move_active_container_to_workspace(writer, name);
             },
             .rename => |data| {
                 const source = fmt_workspace_name(data.source);
                 const target = fmt_workspace_name(data.target);
-                try I3_Impl.rename_workspace(socket, alloc, source, target);
+                try I3.rename_workspace(writer, source, target);
             },
             .set_focused => |workspace| {
                 const name = fmt_workspace_name(workspace);
-                try I3_Impl.switch_to_workspace(socket, alloc, name);
+                try I3.switch_to_workspace(writer, name);
             },
+        }
+        if (!@import("builtin").is_test) {
+            try I3.read_reply_expect_single_success_true(reader, alloc, .COMMAND);
         }
     }
 }
@@ -624,7 +644,7 @@ fn pretty_list_workspaces(alloc: Allocator, state: *const State) !void {
             debug.print("{s}:\n", .{workspace.output});
             output = workspace.output;
         }
-        debug.print("{s}[{s}]\n", .{ prefix, fmt_workspace_name(workspace) });
+        debug.print("{s}[{f}]\n", .{ prefix, fmt_workspace_name(workspace) });
         debug.print("{s}   name: {s}\n", .{ prefix, workspace.name });
         debug.print("{s}  group: {s}\n", .{ prefix, workspace.group_name });
         debug.print("{s}     id: {d}\n", .{ prefix, if (workspace.i3) |i3_data| i3_data.id else 0 });
@@ -639,12 +659,12 @@ fn fmt_workspace_name(workspace: *const Workspace) WorkspaceNameFormat {
 const WorkspaceNameFormat = struct {
     workspace: *const Workspace,
 
-    pub fn format(this: *const @This(), comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(this: *const @This(), writer: *Io.Writer) !void {
         if (this.workspace.i3) |i3_data| {
             try writer.writeAll(i3_data.name);
             return;
         }
-        try std.fmt.formatInt(this.workspace.num, 10, .lower, .{}, writer);
+        try writer.printInt(this.workspace.num, 10, .lower, .{});
         try writer.writeByte(':');
         if (this.workspace.group_name.len > 0 and !mem.eql(u8, this.workspace.group_name, GROUP_NAME_DEFAULT)) {
             try writer.writeAll(this.workspace.group_name);
@@ -792,18 +812,18 @@ fn check_do_cmd(
     var args = Args.from_cmd_str(alloc, args_str).?;
     try do_cmd(&state, &args, alloc);
 
-    var cmd_stream = std.ArrayList(u8).init(alloc);
+    var cmd_stream: Io.Writer.Allocating = .init(alloc);
 
-    try exec_i3_commands(I3.Mock, cmd_stream.writer().any(), alloc, state.commands[0..state.commands_count]);
+    try exec_i3_commands(&cmd_stream.writer, @constCast(&std.Io.Reader.failing), alloc, state.commands[0..state.commands_count]);
 
-    var commands = std.ArrayList([]const u8).init(alloc);
-    var cmd_stream_out = std.io.fixedBufferStream(cmd_stream.items);
-    while (try cmd_stream_out.getEndPos() > try cmd_stream_out.getPos()) {
-        const msg_length = try I3.read_msg_header(cmd_stream_out.reader());
-        _ = try I3.read_msg_kind(I3.Command, cmd_stream_out.reader());
-        const msg = try alloc.alloc(u8, msg_length);
-        try std.testing.expectEqual(msg_length, try cmd_stream_out.reader().readAtLeast(msg, msg_length));
-        try commands.append(msg);
+    var commands: std.ArrayList([]const u8) = .empty;
+    var cmd_stream_out: Io.Reader = Io.Reader.fixed(cmd_stream.written());
+    while (cmd_stream_out.peekByte() != error.EndOfStream) {
+        const msg_length = try I3.read_msg_header(&cmd_stream_out);
+        _ = try I3.read_msg_kind(I3.Command, &cmd_stream_out);
+        const msg = try cmd_stream_out.readAlloc(alloc, msg_length);
+        try std.testing.expectEqual(msg_length, msg.len);
+        try commands.append(alloc, msg);
     }
 
     if (expected_commands.len != commands.items.len) {
