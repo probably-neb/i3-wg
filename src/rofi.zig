@@ -56,7 +56,10 @@ pub fn select_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermedi
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     try child.spawn();
-    return .{ .child = child, .writer = child.stdin.?.writer(), .alloc = alloc };
+    var stdin = child.stdin.?;
+    // TODO: buffer writer
+    const writer = stdin.writer(&.{}).interface;
+    return .{ .child = child, .writer = writer, .alloc = alloc };
 }
 
 pub fn select_or_new_writer(alloc: Allocator, label: []const u8) !SelectWriterIntermediate {
@@ -66,6 +69,7 @@ pub fn select_or_new_writer(alloc: Allocator, label: []const u8) !SelectWriterIn
     child.stdout_behavior = .Pipe;
     try child.spawn();
     var stdin = child.stdin.?;
+    // TODO: buffer writer
     const writer = stdin.writer(&.{}).interface;
     return .{ .child = child, .writer = writer, .alloc = alloc };
 }
@@ -96,4 +100,9 @@ pub fn select_or_new(alloc: Allocator, label: []const u8, items: [][]const u8) !
         }
     }
     return .{ .new = result };
+}
+
+const refAllDecls = std.testing.refAllDeclsRecursive;
+test refAllDecls {
+    refAllDecls(@This());
 }

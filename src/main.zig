@@ -51,24 +51,19 @@ pub fn main() !void {
 
     const socket = try I3.connect(alloc);
     defer socket.close();
-    var socket_buf: [1024]u8 = undefined;
-    var socket_writer = socket.writer(&socket_buf).interface;
-    var socket_buf_2: [1024]u8 = undefined;
+    var socket_buf: [512]u8 = undefined;
+    var socket_writer_impl = socket.writer(&socket_buf);
+    const socket_writer = &socket_writer_impl.interface;
+    var socket_buf_2: [512]u8 = undefined;
     var socket_reader_impl = socket.reader(&socket_buf_2);
     const socket_reader = socket_reader_impl.interface();
 
-    // TODO:
-    // WIP: Updating to zig 0.15.1
-    // - Finish converting I3 and compiling
-    // - Try compiling with tests
-    // - Make I3.Socket that is {reader, writer} pair
-    // - Flush!
-    const i3_workspaces = try I3.get_workspaces(&socket_writer, socket_reader, alloc);
+    const i3_workspaces = try I3.get_workspaces(socket_writer, socket_reader, alloc);
 
     var state = try alloc.create(State);
     try state.init_in_place_with_workspace_init(I3.Workspace, alloc, i3_workspaces, Workspace.init_in_place_from_i3);
     try do_cmd(state, &args, alloc);
-    try exec_i3_commands(&socket_writer, socket_reader, alloc, state.commands[0..state.commands_count]);
+    try exec_i3_commands(socket_writer, socket_reader, alloc, state.commands[0..state.commands_count]);
 }
 
 const Args = struct {
@@ -120,7 +115,7 @@ const State = struct {
     commands: [COMMAND_COUNT_MAX]Cmd,
     commands_count: u32,
 
-    const GroupMap = std.StringArrayHashMapUnmanaged(void);
+    const GroupMap = std.StringArrayHashMapUnmanaged(u32);
 
     const WORKSPACE_COUNT_MAX: usize = 512;
     const COMMAND_COUNT_MAX: usize = 512;
@@ -151,17 +146,28 @@ const State = struct {
         state.workspaces = try alloc.alloc((*const Workspace), items.len);
         state.workspace_count = @intCast(items.len);
 
+        var active_workspace_group: ?[]const u8 = null;
         for (items, 0..) |item, index| {
             const workspace = &state.workspace_store[index];
             const focused = init_workspace(workspace, item);
             const group_entry = state.groups.getOrPutAssumeCapacity(workspace.group_name);
             if (group_entry.found_existing) {
                 workspace.group_name = group_entry.key_ptr.*;
+                debug.assert(group_entry.value_ptr.* == group_index_global(workspace.num));
+            } else {
+                group_entry.value_ptr.* = group_index_global(workspace.num);
+                if (group_entry.value_ptr.* == 0) {
+                    active_workspace_group = group_entry.key_ptr.*;
+                }
             }
             state.workspaces[index] = workspace;
             if (focused) {
                 state.focused = workspace;
             }
+        }
+
+        if (SAFETY_CHECKS_ENABLE) {
+            check_active_group_consistency(state.workspaces, active_workspace_group);
         }
     }
 
@@ -316,12 +322,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 .{ user_group_name, true };
             const new_workspace_num = 1;
 
-            // FIXME: rename all workspaces here if group not active (or new)
             renaming: {
-                // number of groups based on unique
-                // var group_logical_indices = try alloc.alloc(u32, state.groups.count());
-                // @memset(group_logical_indices, 0);
-
                 mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_group_index_and_name_less_than);
 
                 var lowest_unused_group_index: u32 = 1;
@@ -423,7 +424,23 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
             // FIXME: how to handle no active group and no group name...
             const active_workspace_group = get_active_workspace_group(state) orelse return error.NoActiveGroup;
 
-            const name = if (args.next()) |arg| arg else blk: {
+            const name_info = if (args.next()) |arg| blk: {
+                var name_info = parse_workspace_name(arg);
+                if (name_info.group_name.len == 0 or name_info.group_name.ptr == GROUP_NAME_DEFAULT.ptr) {
+                    name_info.group_name = active_workspace_group;
+                }
+                const global_group_index = state.groups.get(name_info.group_name) orelse mem.max(u32, state.groups.values());
+                const local_group_index = if (name_info.num) |num|
+                    group_index_local(num)
+                else if (group_index_local_max(state, name_info.group_name)) |num|
+                    num + 1
+                else
+                    1;
+
+                name_info.num = global_group_index * INACTIVE_WORKSPACE_GROUP_FACTOR + local_group_index;
+
+                break :blk name_info;
+            } else blk: {
                 mem.sort(*const Workspace, workspaces, {}, Workspace.sort_by_group_index_and_name_less_than);
                 var group_name_len_max: u64 = 0;
                 var name_len_max: u64 = 0;
@@ -433,68 +450,27 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                     name_len_max = @max(name_len_max, workspace.name.len);
                 }
 
-                var selection = try Rofi.select_or_new_writer(alloc, "Workspace");
+                var selection = try Rofi.select_writer(alloc, "Workspace");
                 // TODO: Pango markup help text here
                 var writer = selection.writer;
 
                 for (workspaces) |workspace| {
                     _ = try writer.splatByte(' ', group_name_len_max -| workspace.group_name.len);
                     try writer.writeAll(workspace.group_name);
-                    _ = try writer.splatByte(' ', name_len_max -| workspace.name.len + 2);
+                    try writer.writeByte(':');
                     try writer.writeAll(workspace.name);
                     try writer.writeByte('\n');
                 }
                 try writer.flush();
-                const maybe_choice = try selection.finish();
-                if (maybe_choice == null) return;
-                const choice = maybe_choice.?;
-                var choice_iter = mem.tokenizeScalar(u8, choice, ' ');
-                _ = choice_iter.next();
-                const name = choice_iter.rest();
-                if (name.len == 0) {
-                    return error.InvalidChoice;
-                }
-                break :blk name;
+                const choice = (try selection.finish()) orelse return;
+                break :blk parse_workspace_name(choice);
             };
             // TODO:
             // - identify whether chosen workspace already exists (and is active workspace group)
             // - if it exists identify he name and switch to it
             // - else create number for it and format name before switching to it
 
-            const workspace_to_switch_to = blk: {
-                // TODO: clone this logic (extract to fn?) to move container to workspace
-                const group_num_max = gnm: {
-                    var group_num_max: u32 = 0;
-                    for (workspaces) |workspace| {
-                        if (is_in_active_group(workspace)) {
-                            group_num_max = @max(group_num_max, workspace.num);
-                        }
-                    }
-                    break :gnm group_num_max;
-                };
-
-                if (std.fmt.parseInt(u32, name, 10) catch null) |num| {
-                    if (num < INACTIVE_WORKSPACE_GROUP_FACTOR) {
-                        for (workspaces) |workspace| {
-                            if (is_in_active_group(workspace) and num == workspace.num) {
-                                break :blk workspace;
-                            }
-                        } else {
-                            const workspace_num = if (num < 10) num else group_num_max + 1;
-                            break :blk try state.find_or_create_workspace(alloc, active_workspace_group, name, workspace_num);
-                        }
-                    }
-                } else {
-                    // otherwise look for a workspace named $name and if we find it return it so we get the workspace number correct
-                    for (workspaces) |workspace| {
-                        if (is_in_active_group(workspace) and mem.eql(u8, workspace.name, name)) {
-                            break :blk workspace;
-                        }
-                    }
-                }
-
-                break :blk try state.find_or_create_workspace(alloc, active_workspace_group, name, group_num_max + 1);
-            };
+            const workspace_to_switch_to = try state.find_or_create_workspace(alloc, name_info.group_name, name_info.name, name_info.num.?);
 
             state.switch_to_workspace(workspace_to_switch_to);
         },
@@ -590,24 +566,19 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
 
 // PERF: batch calls
 fn exec_i3_commands(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator, commands: []State.Cmd) !void {
-    // PERF: make i3 exec functions take anytypes, and create a format wrapper for Workspace
-    //       so that we avoid allocating here, and instead write direct to io
     for (commands) |command| {
         switch (command) {
             .move_container_to_workspace => |workspace| {
-                const name = fmt_workspace_name(workspace);
-                try I3.move_active_container_to_workspace(writer, "{f}", name);
+                try I3.move_active_container_to_workspace(writer, "{f}", fmt_workspace_name(workspace));
             },
             .rename => |data| {
-                const source = fmt_workspace_name(data.source);
-                const target = fmt_workspace_name(data.target);
-                try I3.rename_workspace(writer, "{f}", source, "{f}", target);
+                try I3.rename_workspace(writer, "{f}", fmt_workspace_name(data.source), "{f}", fmt_workspace_name(data.target));
             },
             .set_focused => |workspace| {
-                const name = fmt_workspace_name(workspace);
-                try I3.switch_to_workspace(writer, "{f}", name);
+                try I3.switch_to_workspace(writer, "{f}", fmt_workspace_name(workspace));
             },
         }
+        try writer.flush();
         if (!@import("builtin").is_test) {
             try I3.read_reply_expect_single_success_true(reader, alloc, .COMMAND);
         }
@@ -684,22 +655,14 @@ fn sort_alphabetically(strings: [][]const u8) void {
     mem.sort([]const u8, strings, {}, cmp.less_than);
 }
 
-fn get_active_workspace_group(state: *State) ?[]const u8 {
-    var active_workspace_group: ?[]const u8 = null;
-    for (state.workspaces) |workspace| {
-        if (is_in_active_group(workspace)) {
-            active_workspace_group = workspace.group_name;
-            break;
+fn get_active_workspace_group(state: *const State) ?[]const u8 {
+    var iter = state.groups.iterator();
+    while (iter.next()) |entry| {
+        if (entry.value_ptr.* == 0) {
+            return entry.key_ptr.*;
         }
     }
-    if (active_workspace_group == null and state.focused != null) {
-        active_workspace_group = state.focused.?.group_name;
-    }
-    if (SAFETY_CHECKS_ENABLE) {
-        check_active_group_consistency(state.workspaces, active_workspace_group);
-    }
-
-    return active_workspace_group;
+    return null;
 }
 
 fn check_active_group_consistency(workspaces: []*const Workspace, _active_workspace_group: ?[]const u8) void {
@@ -713,6 +676,16 @@ fn check_active_group_consistency(workspaces: []*const Workspace, _active_worksp
             }
         }
     }
+}
+
+fn group_index_local_max(state: *const State, group_name: []const u8) ?u32 {
+    const global_num = state.groups.get(group_name) orelse return null;
+    var max: ?u32 = null;
+    for (state.workspaces) |workspace| {
+        if (group_index_global(workspace.num) != global_num) continue;
+        max = @max(max orelse 0, group_index_local(workspace.num));
+    }
+    return max;
 }
 
 /// Calculates the global (relative to other groups) index of the workspace number
@@ -844,6 +817,11 @@ fn check_do_cmd(
     }
 }
 
+const refAllDecls = std.testing.refAllDeclsRecursive;
+test refAllDecls {
+    refAllDecls(@This());
+}
+
 test count_digits {
     try std.testing.expectEqual(1, count_digits(1));
     try std.testing.expectEqual(1, count_digits(0));
@@ -878,11 +856,6 @@ test parse_workspace_name {
             return err;
         };
     }
-}
-
-const file = @This();
-test file {
-    std.testing.refAllDeclsRecursive(file);
 }
 
 test "cmd" {

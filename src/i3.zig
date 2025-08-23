@@ -8,7 +8,7 @@ const is_test = @import("builtin").is_test;
 
 pub fn connect(alloc: Allocator) !net.Stream {
     const socket_path = try std.process.getEnvVarOwned(alloc, "I3SOCK");
-    defer alloc.free(socket_path);
+    // defer alloc.free(socket_path);
     const socket = try net.connectUnixSocket(socket_path);
     return socket;
 }
@@ -47,6 +47,7 @@ pub const Workspace = struct {
 
 pub fn get_workspaces(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator) ![]Workspace {
     try exec_command(writer, .GET_WORKSPACES, "");
+    try writer.flush();
     const response_full = try read_reply(reader, alloc, .WORKSPACES);
     const response = try std.json.parseFromSlice([]Workspace, alloc, response_full, .{
         .ignore_unknown_fields = true,
@@ -184,4 +185,10 @@ pub fn read_reply_expect_single_success_true(socket: *Io.Reader, alloc: mem.Allo
         return error.UnsuccessfulResponse;
     }
     return;
+}
+
+const refAllDecls = std.testing.refAllDeclsRecursive;
+
+test refAllDecls {
+    refAllDecls(@This());
 }
