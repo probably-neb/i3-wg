@@ -54,16 +54,19 @@ pub fn get_workspaces(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator) 
     return response.value;
 }
 
-pub fn rename_workspace(socket: *Io.Writer, source: anytype, target: anytype) !void {
-    try exec_command_print(socket, .RUN_COMMAND, "rename workspace {f} to {f}", .{ source, target });
+pub fn rename_workspace(socket: *Io.Writer, comptime source_fmt: []const u8, source: anytype, comptime target_fmt: []const u8, target: anytype) !void {
+    const fmt = "rename workspace " ++ source_fmt ++ " to " ++ target_fmt;
+    try exec_command_print(socket, .RUN_COMMAND, fmt, .{ source, target });
 }
 
-pub fn switch_to_workspace(socket: *Io.Writer, name: anytype) !void {
-    try exec_command_print(socket, .RUN_COMMAND, "workspace {f}", .{name});
+pub fn switch_to_workspace(socket: *Io.Writer, comptime name_fmt: []const u8, name: anytype) !void {
+    const fmt = "workspace " ++ name_fmt;
+    try exec_command_print(socket, .RUN_COMMAND, fmt, .{name});
 }
 
-pub fn move_active_container_to_workspace(socket: *Io.Writer, name: anytype) !void {
-    try exec_command_print(socket, .RUN_COMMAND, "move container to workspace {f}", .{name});
+pub fn move_active_container_to_workspace(socket: *Io.Writer, comptime name_fmt: []const u8, name: anytype) !void {
+    const fmt = "move container to workspace " ++ name_fmt;
+    try exec_command_print(socket, .RUN_COMMAND, fmt, .{name});
 }
 
 pub const Command = enum(i32) {

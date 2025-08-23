@@ -596,16 +596,16 @@ fn exec_i3_commands(writer: *Io.Writer, reader: *Io.Reader, alloc: Allocator, co
         switch (command) {
             .move_container_to_workspace => |workspace| {
                 const name = fmt_workspace_name(workspace);
-                try I3.move_active_container_to_workspace(writer, name);
+                try I3.move_active_container_to_workspace(writer, "{f}", name);
             },
             .rename => |data| {
                 const source = fmt_workspace_name(data.source);
                 const target = fmt_workspace_name(data.target);
-                try I3.rename_workspace(writer, source, target);
+                try I3.rename_workspace(writer, "{f}", source, "{f}", target);
             },
             .set_focused => |workspace| {
                 const name = fmt_workspace_name(workspace);
-                try I3.switch_to_workspace(writer, name);
+                try I3.switch_to_workspace(writer, "{f}", name);
             },
         }
         if (!@import("builtin").is_test) {
