@@ -153,7 +153,6 @@ const State = struct {
             const group_entry = state.groups.getOrPutAssumeCapacity(workspace.group_name);
             if (group_entry.found_existing) {
                 workspace.group_name = group_entry.key_ptr.*;
-                debug.assert(group_entry.value_ptr.* == group_index_global(workspace.num));
             } else {
                 group_entry.value_ptr.* = group_index_global(workspace.num);
                 if (group_entry.value_ptr.* == 0) {
@@ -166,8 +165,9 @@ const State = struct {
             }
         }
 
+        try fix_active_group_consistency(state);
         if (SAFETY_CHECKS_ENABLE) {
-            check_active_group_consistency(state.workspaces, active_workspace_group);
+            try check_active_group_consistency(state.workspaces, active_workspace_group);
         }
     }
 
@@ -337,7 +337,7 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 else
                     "";
                 if (SAFETY_CHECKS_ENABLE) {
-                    check_active_group_consistency(workspaces, if (active_group.len > 0) active_group else null);
+                    try check_active_group_consistency(workspaces, if (active_group.len > 0) active_group else null);
                 }
 
                 if (active_group.len > 0 and mem.eql(u8, active_group, new_workspace_group_name)) {
@@ -397,14 +397,10 @@ fn do_cmd(state: *State, args: *Args, alloc: Allocator) !void {
                 }
             } else group_logical_num_max + 1;
 
-            const workspace_with_num_exists = blk: for (workspaces) |workspace| {
+            for (workspaces) |workspace| {
                 if (workspace.group_name.ptr == group_name.ptr and group_index_local(active_workspace.num) == group_index_local(workspace.num)) {
-                    break :blk true;
+                    return error.TODO_Copying_Over_Containers;
                 }
-            } else false;
-
-            if (workspace_with_num_exists) {
-                return error.TODO_Copying_Over_Containers;
             }
 
             const active_workspace_num = (group_logical_num * INACTIVE_WORKSPACE_GROUP_FACTOR) + group_index_local(active_workspace.num);
@@ -665,16 +661,53 @@ fn get_active_workspace_group(state: *const State) ?[]const u8 {
     return null;
 }
 
-fn check_active_group_consistency(workspaces: []*const Workspace, _active_workspace_group: ?[]const u8) void {
+fn check_active_group_consistency(workspaces: []*const Workspace, _active_workspace_group: ?[]const u8) !void {
     var active_workspace_group = _active_workspace_group;
     for (workspaces) |workspace| {
         if (is_in_active_group(workspace)) {
             if (active_workspace_group) |group| {
-                debug.assert(mem.eql(u8, workspace.group_name, group));
+                if (!mem.eql(u8, workspace.group_name, group)) {
+                    return error.InconsistentActiveGroup;
+                }
             } else {
                 active_workspace_group = workspace.group_name;
             }
         }
+    }
+}
+
+fn fix_active_group_consistency(state: *State) !void {
+    var non_default_active_group_name: ?[]const u8 = null;
+    var group_iter = state.groups.iterator();
+    var lowest_unused_group_index: u32 = 1;
+
+    // todo: don't assert that workspace nums are consistent in init,
+    // and iterate through them here to use existing  numbers if possible
+    while (group_iter.next()) |group| {
+        const global_group_index = group.value_ptr.*;
+        const group_name = group.key_ptr.*;
+        if (global_group_index == 0 and !mem.eql(u8, group_name, GROUP_NAME_DEFAULT)) {
+            non_default_active_group_name = group_name;
+        }
+        if (lowest_unused_group_index == global_group_index) {
+            lowest_unused_group_index = global_group_index + 1;
+        }
+    }
+
+    if (non_default_active_group_name) |active_group_name| {
+        for (state.workspaces, 0..) |workspace, workspace_index| {
+            // rename all workspaces in the default group so that they are not active
+            if (mem.eql(u8, workspace.group_name, GROUP_NAME_DEFAULT)) {
+                const new_workspace = state.rename_workspace(workspace, workspace_index);
+                new_workspace.num = (lowest_unused_group_index * INACTIVE_WORKSPACE_GROUP_FACTOR) + group_index_local(workspace.num);
+            }
+
+            if (mem.eql(u8, workspace.group_name, active_group_name) and group_index_global(workspace.num) != 0) {
+                return error.NotAllWorkspacesInActiveGroupAreActive;
+            }
+        }
+    } else {
+        // todo: otherwise, make all default workspaces active
     }
 }
 
