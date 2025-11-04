@@ -202,6 +202,9 @@ const State = struct {
         state.workspace_store[state.workspace_count].i3 = null;
         state.workspace_count += 1;
         const result = &state.workspace_store[state.workspace_count - 1];
+        if (state.focused == state.workspaces[index]) {
+            state.focused = result;
+        }
         state.workspaces[index] = result;
         return result;
     }
