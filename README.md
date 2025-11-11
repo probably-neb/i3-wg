@@ -4,7 +4,7 @@
 
 `i3-wg` is a rewrite of the [i3-workspace-groups](https://github.com/infokiller/i3-workspace-groups) project.
 
-It is currently a work in progress and is missing some features of the original project (see [TODO.norg](./TODO.norg)), however, I have personally completely switched over to using it
+It is currently a work in progress and is missing some features of the original project (see [TODO.md](./TODO.md)), however, I have personally completely switched over to using it
 
 ## Why?
 
